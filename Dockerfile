@@ -13,7 +13,10 @@ RUN pip install -r requirements.txt
 # Copy the application source.
 COPY . .
 
-# SQLite lives under data/ — mount a persistent volume here in production.
-RUN mkdir -p /app/data && chmod 777 /app/data
+# SQLite lives under data/ — the directory must exist in the image so
+# Render's persistent-disk mount at runtime can bind over it. We drop
+# `chmod 777` because the volume mount overlays the directory at runtime,
+# making the in-image chmod irrelevant.
+RUN mkdir -p /app/data
 
 CMD ["python", "main.py"]

@@ -14,11 +14,24 @@
 #     plan: starter   # $7/mo
 # ...commit + push, and delete the existing free Web Service after the new
 # Worker comes up.
+#
+# Runtime: docker — required because Render's native Python runtime uses
+# Poetry internally and installs deps into a venv that the runtime python3
+# doesn't activate (ModuleNotFoundError: No module named 'discord'). Docker
+# sidesteps that by installing deps to the system Python inside the image.
+# Build = Dockerfile's RUN pip install ...   Start = Dockerfile's CMD.
+#
+# Health check caveat: `type: web` tells Render to HTTP-probe PORT (default
+# 10000) every few seconds. Discord bots don't serve HTTP, so this service
+# will report "unhealthy" in the dashboard. On the free tier this is
+# cosmetic — the process keeps running and connects to Discord. To make
+# Render happy, add a small aiohttp.web route on PORT/healthz in main.py
+# returning 200 OK (see followups).
 
 services:
   - type: web
     name: nerai-bypasser-bot
-    runtime: python
+    runtime: docker
     plan: free
     region: oregon
     branch: main
@@ -26,10 +39,10 @@ services:
     # numInstances must be 1 whenever a persistent disk is attached.
     numInstances: 1
 
-    # Pip install + start. `python3` (not `python`) is required: Render's
-    # Python runtime only exposes `python3` on PATH.
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: python3 main.py
+    # When runtime: docker, Render ignores buildCommand / startCommand and
+    # uses the Dockerfile instead. Render looks for ./Dockerfile by default;
+    # we set dockerfilePath explicitly so the contract is clear.
+    dockerfilePath: ./Dockerfile
 
     # Persistent disk so the SQLite index survives restarts and redeploys.
     # The bot reads DATABASE_PATH from env, which we set to /app/data/bot.sqlite

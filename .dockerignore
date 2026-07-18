@@ -1,0 +1,59 @@
+# Secrets / env files — never bake into the image.
+# .env.example is --skip-worktree'd in git (so the placeholder commits),
+# but Docker's COPY reads from the working tree on disk, which still has
+# the real DISCORD_TOKEN. Excluding .env.example here is the only safe
+# move (--skip-worktree protects git only, not Docker's build context).
+.env
+.env.example
+.env.*
+
+# Local Python venvs — never ship.
+.venv/
+venv/
+env/
+
+# SQLite database + WAL + SHM — these live on Render's persistent disk
+# at runtime, must not be baked into the image.
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Python bytecode + test cache.
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Common Python dev artifacts that can exist locally and bloat the image.
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+*.log
+dist/
+build/
+*.egg
+
+# IDE / editor directories.
+.vscode/
+.idea/
+
+# Git internals + tooling files.
+.git/
+.gitignore
+.dockerignore
+
+# Render / Heroku deployment descriptors — Docker doesn't use them,
+# they're noise in the image.
+render.yaml
+runtime.txt
+Procfile
+
+# Docs + tests — production image doesn't need them.
+README.md
+tests/
+docs/
