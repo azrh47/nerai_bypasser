@@ -70,7 +70,7 @@ $EDITOR .env                 # fill in DISCORD_TOKEN, IDs, etc.
 ### 3. Smoke run
 
 ```bash
-python main.py
+python3 main.py
 ```
 
 On first launch the bot will:
