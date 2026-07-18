@@ -1,0 +1,85 @@
+# Render Blueprint for the Discord Mega-link indexer bot.
+# Reference: https://render.com/docs/blueprint-spec
+#
+# To apply:
+#   Render dashboard -> New -> Blueprint -> point at this repo's main branch.
+#   Render will prompt you for each `sync: false` env var below.
+#
+# Service type: web + Plan: free — keeps the repo on the free tier and
+# mirrors the shape of the service already running. The downside: free Web
+# Services idle-sleep after 15 min and resume on the next inbound signal,
+# which means Mega reposts posted during a nap won't be indexed until the
+# bot wakes up. For an always-on Discord bot, switch this to
+#     type: worker
+#     plan: starter   # $7/mo
+# ...commit + push, and delete the existing free Web Service after the new
+# Worker comes up.
+
+services:
+  - type: web
+    name: nerai-bypasser-bot
+    runtime: python
+    plan: free
+    region: oregon
+    branch: main
+
+    # numInstances must be 1 whenever a persistent disk is attached.
+    numInstances: 1
+
+    # Pip install + start. `python3` (not `python`) is required: Render's
+    # Python runtime only exposes `python3` on PATH.
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python3 main.py
+
+    # Persistent disk so the SQLite index survives restarts and redeploys.
+    # The bot reads DATABASE_PATH from env, which we set to /app/data/bot.sqlite
+    # below — render.yaml's disk.mountPath and DATABASE_PATH must agree.
+    # Disk adds ~ $1/mo on the free tier (storage charge only); we depend on
+    # this so the index survives the idle-sleep/restart cycle.
+    disk:
+      name: bot-data
+      mountPath: /app/data
+      sizeGB: 1
+
+    envVars:
+      # ---------- Secrets ----------
+      # Render will prompt you to fill these in on first apply.
+      # Never paste real values into this yaml.
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: TARGET_GUILD_ID
+        sync: false
+      - key: SOURCE_GUILD_IDS
+        sync: false
+      - key: SOURCE_CHANNELS
+        sync: false
+      - key: ADMIN_USER_IDS
+        sync: false
+
+      # ---------- Non-secret defaults ----------
+      # Override any of these in the Render dashboard if you want to change them.
+
+      # SQLite lives on the persistent disk so the index survives redeploys.
+      - key: DATABASE_PATH
+        value: /app/data/bot.sqlite
+
+      - key: SCHEMA_PATH
+        value: schema.sql
+
+      - key: COOLDOWN_SECONDS
+        value: "5"
+
+      - key: SEARCH_PAGE_SIZE
+        value: "10"
+
+      - key: FUZZY_CANDIDATE_LIMIT
+        value: "80"
+
+      - key: MEGA_STALENESS_CHECK
+        value: "false"
+
+      # ALLOWED_ROLE_NAME and SOURCE_GUILD_ID are intentionally NOT declared.
+      # Leaving them unset lets `os.getenv()` return None, which config.py
+      # treats as "no role gate" / "no legacy singular source guild". Omitting
+      # the key is the correct way to express "unset" in Render Blueprints —
+      # do not set value: "" for these.
