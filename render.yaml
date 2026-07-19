@@ -21,12 +21,11 @@
 # sidesteps that by installing deps to the system Python inside the image.
 # Build = Dockerfile's RUN pip install ...   Start = Dockerfile's CMD.
 #
-# Health check caveat: `type: web` tells Render to HTTP-probe PORT (default
-# 10000) every few seconds. Discord bots don't serve HTTP, so this service
-# will report "unhealthy" in the dashboard. On the free tier this is
-# cosmetic — the process keeps running and connects to Discord. To make
-# Render happy, add a small aiohttp.web route on PORT/healthz in main.py
-# returning 200 OK (see followups).
+# Health check: `type: web` makes Render HTTP-probe $PORT (default 10000)
+# every few seconds. ``main.py`` runs a tiny aiohttp server on that port
+# returning 200 OK on / and /healthz, so the probe passes and the service
+# stays "healthy" in the dashboard. The Discord gateway still rides the
+# same event loop.
 
 services:
   - type: web
