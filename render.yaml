@@ -3,17 +3,16 @@
 #
 # To apply:
 #   Render dashboard -> New -> Blueprint -> point at this repo's main branch.
-#   Render will prompt you for each `sync: false` env var below.
+#   Render will prompt you to fill each `sync: false` secret value below.
 #
-# Service type: web + Plan: free — keeps the repo on the free tier and
-# mirrors the shape of the service already running. The downside: free Web
-# Services idle-sleep after 15 min and resume on the next inbound signal,
-# which means Mega reposts posted during a nap won't be indexed until the
-# bot wakes up. For an always-on Discord bot, switch this to
-#     type: worker
-#     plan: starter   # $7/mo
-# ...commit + push, and delete the existing free Web Service after the new
-# Worker comes up.
+# Service type: web + Plan: starter — required because the persistent disk
+# attached below is NOT supported on Render's free instance types. Render's
+# disks docs spell this out: "You can attach a persistent disk to a *paid*
+# Render web service, private service, or background worker."
+# (https://render.com/docs/disks). The free plan only supports an ephemeral
+# filesystem, which would lose the SQLite index on every redeploy. To go
+# back to the free plan, also delete the `disk:` block — the index will
+# rebuild from scratch on every deploy.
 #
 # Runtime: docker — required because Render's native Python runtime uses
 # Poetry internally and installs deps into a venv that the runtime python3
@@ -21,22 +20,45 @@
 # sidesteps that by installing deps to the system Python inside the image.
 # Build = Dockerfile's RUN pip install ...   Start = Dockerfile's CMD.
 #
+# IMPORTANT: leave Build Command / Start Command empty in the Render
+# dashboard. With `runtime: docker`, Render uses the Dockerfile CMD for
+# the running container; the dashboard Build/Start fields aren't part
+# of the Docker path. Stale non-docker values in the dashboard tend to
+# confuse newcomers and have historically caused the same `ModuleNotFoundError`
+# class of failure when someone later edits the dashboard and expects the
+# Dockerfile to still take effect.
+#
 # Health check: `type: web` makes Render HTTP-probe $PORT (default 10000)
 # every few seconds. ``main.py`` runs a tiny aiohttp server on that port
 # returning 200 OK on / and /healthz, so the probe passes and the service
 # stays "healthy" in the dashboard. The Discord gateway still rides the
-# same event loop.
+# same event loop. `healthCheckPath: /healthz` (below) tells Render which
+# path to probe explicitly.
+#
+# NOTE on "always-on": a paid `type: web` service does NOT idle-sleep, so
+# there is no need to switch to `type: worker`. Earlier versions of this
+# file suggested that switch — it was misleading because `type: worker`
+# services do not bind $PORT, which would silently break the /healthz
+# probe above. If you ever go back to the free plan and lose the disk,
+# pair the (still-`web`) deployment with an external uptime pinger — e.g.
+# UptimeRobot hitting /healthz — to keep it warm during the 15-min sleep
+# window.
 
 services:
   - type: web
     name: nerai-bypasser-bot
     runtime: docker
-    plan: free
+    plan: starter
     region: oregon
     branch: main
 
     # numInstances must be 1 whenever a persistent disk is attached.
     numInstances: 1
+
+    # Tells Render which path to HTTP-probe for health. main.py exposes
+    # /healthz and / as 200 OK on $PORT via aiohttp; without this field
+    # Render falls back to its own opaque probe path.
+    healthCheckPath: /healthz
 
     # When runtime: docker, Render ignores buildCommand / startCommand and
     # uses the Dockerfile instead. Render looks for ./Dockerfile by default;
@@ -46,8 +68,8 @@ services:
     # Persistent disk so the SQLite index survives restarts and redeploys.
     # The bot reads DATABASE_PATH from env, which we set to /app/data/bot.sqlite
     # below — render.yaml's disk.mountPath and DATABASE_PATH must agree.
-    # Disk adds ~ $1/mo on the free tier (storage charge only); we depend on
-    # this so the index survives the idle-sleep/restart cycle.
+    # Disk cost is on top of the plan instance rate; see
+    # https://render.com/pricing for current numbers.
     disk:
       name: bot-data
       mountPath: /app/data
@@ -57,6 +79,9 @@ services:
       # ---------- Secrets ----------
       # Render will prompt you to fill these in on first apply.
       # Never paste real values into this yaml.
+      # `sync: false` → Render treats the dashboard value as the source
+      # of truth. The key is declared here only so Render knows it should
+      # exist; the value lives in the dashboard.
       - key: DISCORD_TOKEN
         sync: false
       - key: TARGET_GUILD_ID
@@ -68,27 +93,41 @@ services:
       - key: ADMIN_USER_IDS
         sync: false
 
-      # ---------- Non-secret defaults ----------
-      # Override any of these in the Render dashboard if you want to change them.
+      # ---------- Non-secret tunables ----------
+      # Every key in this section carries `sync: false` so the Render
+      # dashboard is the source of truth. To change COOLDOWN_SECONDS in
+      # practice, edit it in the Render dashboard — do NOT edit this file,
+      # or your change will be silently overwritten on the next push /
+      # Blueprint sync.
+      #
+      # Absent `sync: false`, the Blueprint value wins on every sync and
+      # any dashboard edit gets clobbered back. `sync: false` flips this
+      # for these keys so dashboard edits stick.
 
       # SQLite lives on the persistent disk so the index survives redeploys.
       - key: DATABASE_PATH
         value: /app/data/bot.sqlite
+        sync: false
 
       - key: SCHEMA_PATH
         value: schema.sql
+        sync: false
 
       - key: COOLDOWN_SECONDS
         value: "5"
+        sync: false
 
       - key: SEARCH_PAGE_SIZE
         value: "10"
+        sync: false
 
       - key: FUZZY_CANDIDATE_LIMIT
         value: "80"
+        sync: false
 
       - key: MEGA_STALENESS_CHECK
         value: "false"
+        sync: false
 
       # ALLOWED_ROLE_NAME and SOURCE_GUILD_ID are intentionally NOT declared.
       # Leaving them unset lets `os.getenv()` return None, which config.py
