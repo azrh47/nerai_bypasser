@@ -630,6 +630,10 @@ def test_index_channel_forum_persists_with_forum_id(monkeypatch):
     # list property), NOT ``fetch_active_threads``. The test fixture
     # mirrors that: an explicit empty list rather than a coroutine.
     forum.guild.active_threads = []
+    # Disabled in this fixture so the regression test below pins the
+    # archived-thread path independently. None makes the helper
+    # short-circuit cleanly rather than invoking a MagicMock accessor.
+    forum.archived_threads = None
 
     thread = MagicMock(spec=discord.Thread)
     thread.id = 8001
@@ -650,6 +654,124 @@ def test_index_channel_forum_persists_with_forum_id(monkeypatch):
     entry = indexer.db.upsert_entry.await_args.args[0]
     assert entry["source_channel_id"] == 777
     assert entry["mega_url"] == "https://mega.nz/file/AbCd#EfGh"
+
+
+def test_collect_forum_archived_threads_yields_threads(monkeypatch):
+    """The archived-threads helper must return every Thread surfaced by
+    forum.archived_threads(limit=...), regardless of whether the API
+    yields bare Thread objects or (Thread, starter_message) tuples (the
+    two shapes discord.py exposes across 2.x micro-versions). This is
+    the regression test for the production ``indexed=0`` cause: archived
+    forum posts (e.g. "Dead Space") that Discord auto-archives after
+    inactivity and that the active cache alone never surfaces.
+    """
+    import config
+
+    monkeypatch.setattr(config, "SOURCE_CHANNELS", [777], raising=False)
+    monkeypatch.setattr(config, "SOURCE_GUILD_IDS", [100], raising=False)
+    indexer = _make_indexer(monkeypatch)
+
+    forum = MagicMock(spec=discord.ForumChannel)
+    forum.id = 777
+    forum.parent_id = 777  # not strictly required, but realistic
+
+    # Two shapes: one bare Thread, one (Thread, starter_message) tuple.
+    archived_thread_a = MagicMock(spec=discord.Thread)
+    archived_thread_a.id = 9001
+    archived_thread_a.parent_id = 777
+    starter_b = MagicMock(spec=discord.Message)
+    starter_b.id = 9002
+    archived_thread_b = MagicMock(spec=discord.Thread)
+    archived_thread_b.id = 9002
+    archived_thread_b.parent_id = 777
+
+    async def fake_archived_threads(*args, **kwargs):
+        yield archived_thread_a
+        yield (archived_thread_b, starter_b)
+
+    async def fake_archived_threads_coro(*args, **kwargs):
+        async for item in fake_archived_threads(*args, **kwargs):
+            yield item
+
+    forum.archived_threads = fake_archived_threads_coro
+
+    result = asyncio.run(indexer._collect_forum_archived_threads(forum))
+    assert [t.id for t in result] == [9001, 9002]
+
+
+def test_collect_forum_archived_threads_returns_empty_when_no_accessor(
+    monkeypatch,
+):
+    """If forum.archived_threads is None (older discord.py versions or
+    FutureWarning'd removal) the helper must return [] safely without
+    raising -- otherwise index_channel crashes mid-backfill."""
+    import config
+
+    monkeypatch.setattr(config, "SOURCE_CHANNELS", [777], raising=False)
+    monkeypatch.setattr(config, "SOURCE_GUILD_IDS", [100], raising=False)
+    indexer = _make_indexer(monkeypatch)
+
+    forum = MagicMock(spec=discord.ForumChannel)
+    forum.id = 777
+    forum.archived_threads = None
+
+    result = asyncio.run(indexer._collect_forum_archived_threads(forum))
+    assert result == []
+
+
+def test_index_channel_forum_includes_archived_threads(monkeypatch):
+    """End-to-end pin: an archived thread (parent_id == forum.id) that
+    contains a Mega URL must be picked up by index_channel even when the
+    active cache returns zero threads. This is the regression that pinned
+    the original ``indexed=0`` production issue: Discord auto-archives
+    most forum posts after ~24h, so without this path the index never
+    fills up across a typical deployment window.
+    """
+    import config
+
+    monkeypatch.setattr(config, "SOURCE_CHANNELS", [777], raising=False)
+    monkeypatch.setattr(config, "SOURCE_GUILD_IDS", [100], raising=False)
+    indexer = _make_indexer(monkeypatch)
+
+    msg = MagicMock(spec=discord.Message)
+    msg.id = 4242
+    msg.author = MagicMock()
+    msg.author.id = 1
+    msg.author.bot = False
+    msg.created_at = None
+    msg.content = "https://mega.nz/file/Archived#Pass"
+    msg.embeds = []
+    msg.components = []
+
+    async def thread_history(**kwargs):
+        yield msg
+
+    archived = MagicMock(spec=discord.Thread)
+    archived.id = 9001
+    archived.parent_id = 777
+    archived.history = thread_history
+
+    forum = MagicMock(spec=discord.ForumChannel)
+    forum.id = 777
+    forum.threads = []  # active cache empty -- the bug scenario
+    forum.guild = MagicMock()
+    forum.guild.id = 100
+    forum.guild.active_threads = []
+
+    async def fake_archived(*args, **kwargs):
+        yield archived
+
+    forum.archived_threads = fake_archived
+
+    indexer.bot.get_channel = MagicMock(return_value=forum)
+
+    result = asyncio.run(indexer.index_channel(777, 100))
+    assert result["error"] is None
+    assert result["indexed"] == 1
+    assert indexer.db.upsert_entry.await_count == 1
+    entry = indexer.db.upsert_entry.await_args.args[0]
+    assert entry["source_channel_id"] == 777
+    assert entry["mega_url"] == "https://mega.nz/file/Archived#Pass"
 
 
 def test_index_channel_forum_no_threads_is_ok(monkeypatch):

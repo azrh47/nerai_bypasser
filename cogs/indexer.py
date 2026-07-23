@@ -269,15 +269,41 @@ class Indexer(commands.Cog):
                 "Partial state reading forum.threads for %s: %s",
                 forum.id, exc,
             )
-        # Step 2: guild-wide active threads (cached list, no API call).
-        # discord.py 2.x has NO ``fetch_active_threads`` method on Guild;
-        # the only attribute available is the cached ``active_threads``
-        # list (a property). This is what the Python AttributeError
-        # hint ``Did you mean: 'active_threads'?`` is telling us.
+        # Step 2: guild-wide active threads. The Discord Python attribute
+        # hint in the runtime AttributeError pointed at
+        # ``Did you mean: 'active_threads'?`` -- and in discord.py 2.x the
+        # guild-wide cache is exposed by that name. We do NOT trust the
+        # micro-version here: depending on the release line,
+        # ``active_threads`` can be a ``@property`` returning a list (newer
+        # 2.x), a synchronous method returning a list, or an async
+        # coroutine returning a list. We handle all three so the fallback
+        # to ``forum.threads`` is only needed when the guild cache itself
+        # is empty -- never because we tripped over a method/property
+        # mismatch.
+        guild_active: list[discord.Thread] = []
         try:
-            guild_active = list(
-                getattr(forum.guild, "active_threads", None) or []
-            )
+            _active = getattr(forum.guild, "active_threads", None)
+            if _active is None:
+                guild_active = []
+            elif callable(_active):
+                # Property-of-method or sync method: callable returns
+                # either a list directly or an awaitable coroutine we
+                # must await. ``asyncio.iscoroutine`` short-circuits sync
+                # lists so this branch works for both shapes.
+                _value = _active()
+                if asyncio.iscoroutine(_value):
+                    try:
+                        _value = await _value
+                    except (discord.HTTPException, discord.Forbidden) as exc:
+                        logger.warning(
+                            "active_threads() await failed for guild %s: %s",
+                            forum.guild.id, exc,
+                        )
+                        _value = []
+                guild_active = list(_value or [])
+            else:
+                # Already a list-like property value: iterate as-is.
+                guild_active = list(_active or [])
         except (AttributeError, TypeError) as exc:
             logger.warning(
                 "Could not read guild.active_threads for %s: %s; "
@@ -301,6 +327,119 @@ class Indexer(commands.Cog):
             ):
                 seen.add(thread.id)
                 out.append(thread)
+        # Step 3: archived forum threads. Discord auto-archives forum
+        # posts after a configurable inactivity window (default 24h),
+        # and the active cache alone never returns them. Skipping this
+        # step is the bug we hit on the first production indexer
+        # pass: indexed=0 because the user-facing TopTopics (e.g.
+        # "Dead Space") had already been moved to archived status.
+        # Logger verbosity is debug-only because a healthy guild with
+        # all-active threads will query the API just to return []
+        # -- no need to alarm operators on every cycle.
+        #
+        # No outer try/except here on purpose: ``_collect_forum_archived_threads``
+        # already swallows its own ``HTTPException`` / ``Forbidden`` /
+        # generic errors internally with ``logger.warning`` /
+        # ``logger.exception``. Anything escaping that helper is a real
+        # programming bug (a ``KeyError`` from a future refactor, a
+        # ``TypeError`` from a discord.py 3.x signature change, etc.) we
+        # WANT to crash on so it surfaces in the operator's logs instead
+        # of getting silently masked by the per-channel catching in
+        # ``_backfill_all``.
+        archived = await self._collect_forum_archived_threads(forum)
+        archived_count = 0
+        for thread in archived:
+            if (
+                isinstance(thread, discord.Thread)
+                and thread.parent_id == forum.id
+                and thread.id not in seen
+            ):
+                seen.add(thread.id)
+                out.append(thread)
+                archived_count += 1
+        if archived_count:
+            logger.debug(
+                "Forum %s: surfaced %d archived threads beyond "
+                "active cache",
+                forum.id, archived_count,
+            )
+        return out
+
+    async def _collect_forum_archived_threads(
+        self, forum: discord.ForumChannel
+    ) -> list[discord.Thread]:
+        """Return archived threads inside ``forum`` that the active cache
+        does not list.
+
+        Discord auto-archives forum posts after a configurable inactivity
+        window (default 24h, per-guild override). Indexing only the
+        ACTIVE-thread cache therefore silently drops every older game
+        post -- which is exactly the symptom that produced the first
+        ``indexed=0`` production deployment. Without this enumeration the
+        bot's index never fills up regardless of how long it runs.
+
+        discord.py 2.x exposes the archived-threads API in two shapes
+        across micro-versions:
+
+        * ``forum.archived_threads(limit, before)`` -- async iterator of
+          ``Thread`` (older 2.x).
+        * ``forum.archived_threads(limit, before)`` -- async iterator of
+          ``Tuple[Thread, Message]`` (newer 2.x where the starter
+          message is bundled for efficiency).
+
+        Both shapes are handled here. Failures (permission, partial
+        state, attribute absent on a 2.x micro-version) are logged
+        silently and yield an empty list -- the active-cache list
+        remains the source of truth on failure so a flaky archived
+        fetch never blocks the visible index.
+        """
+        out: list[discord.Thread] = []
+        accessor = getattr(forum, "archived_threads", None)
+        if accessor is None or not callable(accessor):
+            logger.debug(
+                "Forum %s has no archived_threads accessor in this "
+                "discord.py micro-version; skipping archived pass",
+                forum.id,
+            )
+            return out
+        try:
+            iterator = accessor(limit=200)
+            if asyncio.iscoroutine(iterator):
+                # Some 2.x variants wrap the iterator in a coroutine for
+                # eager fetching. Await and re-use the result.
+                iterator = await iterator
+        except (AttributeError, TypeError) as exc:
+            logger.warning(
+                "forum.archived_threads() probe failed for %s: %s",
+                forum.id, exc,
+            )
+            return out
+        try:
+            async for item in iterator:
+                # Older 2.x: each item is a Thread.
+                # Newer 2.x: each item is a (Thread, starter_message)
+                # tuple -- the starter message is not used here; we
+                # pull it back out via the indexer pass below.
+                if isinstance(item, tuple):
+                    for element in item:
+                        if isinstance(element, discord.Thread):
+                            out.append(element)
+                            break
+                elif isinstance(item, discord.Thread):
+                    out.append(item)
+        except (discord.HTTPException, discord.Forbidden) as exc:
+            logger.warning(
+                "forum.archived_threads iteration failed for %s: %s; "
+                "active-cache list remains sole source of truth",
+                forum.id, exc,
+            )
+            return out
+        except Exception:
+            logger.exception(
+                "Unexpected error walking forum.archived_threads for %s",
+                forum.id,
+            )
+            return out
         return out
 
     async def _iter_thread_messages(
