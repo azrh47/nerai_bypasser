@@ -626,7 +626,10 @@ def test_index_channel_forum_persists_with_forum_id(monkeypatch):
     forum.id = 777
     forum.guild = MagicMock()
     forum.guild.id = 100
-    forum.guild.fetch_active_threads = AsyncMock(return_value=[])
+    # discord.py 2.x discord.Guild only exposes ``active_threads`` (cached
+    # list property), NOT ``fetch_active_threads``. The test fixture
+    # mirrors that: an explicit empty list rather than a coroutine.
+    forum.guild.active_threads = []
 
     thread = MagicMock(spec=discord.Thread)
     thread.id = 8001
@@ -667,7 +670,9 @@ def test_index_channel_forum_no_threads_is_ok(monkeypatch):
     forum.threads = []
     forum.guild = MagicMock()
     forum.guild.id = 100
-    forum.guild.fetch_active_threads = AsyncMock(return_value=[])
+    # discord.py 2.x guild.active_threads is a list property, not an
+    # asyncmethod. Empty list = no additional guild-wide cached threads.
+    forum.guild.active_threads = []
 
     indexer.bot.get_channel = MagicMock(return_value=forum)
 

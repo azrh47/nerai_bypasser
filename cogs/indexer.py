@@ -10,7 +10,7 @@ Supported source channel shapes (discord.py 2.x):
 * ``TextChannel`` -- tight ``history()`` loop, the original path.
 * ``Thread``     -- same tight loop, walking the thread's messages.
 * ``ForumChannel`` -- enumerate accessible threads inside the forum
-  (``forum.threads`` cache + ``guild.fetch_active_threads()`` filtered by
+  (``forum.threads`` cache + ``guild.active_threads`` filtered by
   ``parent_id``), then run the same per-thread loop. ``source_channel_id``
   recorded in the DB is the FORUM's id, so admin stats group by forum.
 
@@ -212,15 +212,20 @@ class Indexer(commands.Cog):
     #
     #   * ``forum.threads``  -- gateway-cached list of currently-active threads
     #                           (cheap; usually incomplete for long-lived forums)
-    #   * ``forum.guild.fetch_active_threads()`` -- one API call that returns
-    #                           every active thread across the guild; filter by
-    #                           ``parent_id`` to keep only this forum's threads
+    #   * ``forum.guild.active_threads`` -- the gateway-cached list of every
+    #                           active thread across the guild (a property, not
+    #                           a coroutine). Filter by ``parent_id`` to keep
+    #                           only this forum's threads.
+    #
+    # NOTE: discord.py 2.x has NO ``Guild.fetch_active_threads`` -- only the
+    # cached ``active_threads`` property. The Python AttributeError hint
+    # ``Did you mean: 'active_threads'?`` is the giveaway.
     #
     # Neither API exposes ARCHIVED forum threads cleanly in 2.7. Discord's REST
     # endpoints ``GET /channels/{id}/threads/archived/{public,private}`` exist
     # but are not wrapped by ``ForumChannel``. We lean on Discord's eventual
     # consistency: a freshly-archived thread typically appears in
-    # ``fetch_active_threads`` for a brief window before flipping to archived,
+    # ``guild.active_threads`` for a brief window before flipping to archived,
     # and ``on_message`` covers threads that go live afterwards. Manual
     # ``/admin reseed`` is the user-driven escape hatch -- acceptable for a
     # bot whose operator is actively monitoring the index.
@@ -230,42 +235,48 @@ class Indexer(commands.Cog):
     ) -> list[discord.Thread]:
         """Return every accessible active thread inside ``forum``.
 
-        Order: gateway-cached threads first (cheapest iteration), then any
-        additional active threads surfaced by ``guild.fetch_active_threads``
-        that the gateway doesn't yet know about. The two lists are deduped
-        by thread id.
+        Order: forum-local gateway cache first (cheapest iteration), then
+        any additional active threads surfaced by ``guild.active_threads``
+        (the entire guild's active-thread cache) that the forum's local
+        cache doesn't yet know about. The two lists are deduped by
+        thread id.
+
+        discord.py 2.x does NOT expose ``guild.fetch_active_threads`` ---
+        Python's attribute-lookup error message hints
+        ``Did you mean: 'active_threads'?``, and that's correct: Guild
+        has the cached ``active_threads`` PROPERTY (a list of Thread
+        objects the gateway has told us about) but no async fetcher.
         """
         seen: set[int] = set()
         out: list[discord.Thread] = []
-        # Step 1: gateway cache. ``forum.threads`` may be None during partial
-        # state; treat as empty.
+        # Step 1: forum-local cached threads (``forum.threads`` is a
+        # property exposing the gateway cache). May be None / incomplete
+        # during partial state; treat as empty.
         try:
             for thread in (getattr(forum, "threads", None) or []):
                 if thread.id not in seen:
                     seen.add(thread.id)
                     out.append(thread)
-        except Exception:
-            logger.exception(
-                "Failed to read forum.threads property for %s", forum.id
-            )
-        # Step 2: guild-wide active threads (one HTTP call per channel index
-        # pass; acceptable for a bot that indexer-pauses the bot's event loop
-        # in a Lock). On a populated guild this returns at most 100 threads
-        # which is sufficient for "active" filtering in practice.
-        try:
-            guild_active = await forum.guild.fetch_active_threads()
-        except (discord.HTTPException, discord.Forbidden) as exc:
+        except (AttributeError, TypeError) as exc:
+            # Partial-state access raises -- empty cache, not a bug.
             logger.warning(
-                "fetch_active_threads failed for guild %s: %s; "
-                "falling back to cache-only list",
-                forum.guild.id,
-                exc,
+                "Partial state reading forum.threads for %s: %s",
+                forum.id, exc,
             )
-            guild_active = []
-        except Exception:
-            logger.exception(
-                "Unexpected error fetching active threads for guild %s",
-                forum.guild.id,
+        # Step 2: guild-wide active threads (cached list, no API call).
+        # discord.py 2.x has NO ``fetch_active_threads`` method on Guild;
+        # the only attribute available is the cached ``active_threads``
+        # list (a property). This is what the Python AttributeError
+        # hint ``Did you mean: 'active_threads'?`` is telling us.
+        try:
+            guild_active = list(
+                getattr(forum.guild, "active_threads", None) or []
+            )
+        except (AttributeError, TypeError) as exc:
+            logger.warning(
+                "Could not read guild.active_threads for %s: %s; "
+                "falling back to forum.threads only",
+                forum.guild.id, exc,
             )
             guild_active = []
         for thread in guild_active:
@@ -295,7 +306,13 @@ class Indexer(commands.Cog):
                 "oldest_first": True,
             }
             if local_after is not None:
-                kwargs["after"] = local_after
+                # discord.py 2.7's _after_strategy accesses
+                # ``after.id`` directly: ``after_id = after.id if after
+                # else None``. A raw int therefore raises ``'int'
+                # object has no attribute 'id'``. Wrapping in
+                # ``discord.Object`` exposes the .id attribute without
+                # triggering a real fetch.
+                kwargs["after"] = discord.Object(id=local_after)
             batch_count = 0
             async for msg in thread.history(**kwargs):
                 added = await self._run_parser(
@@ -431,7 +448,12 @@ class Indexer(commands.Cog):
                     "oldest_first": True,
                 }
                 if after_id is not None:
-                    kwargs["after"] = after_id
+                    # discord.py 2.7's _after_strategy accesses
+                    # ``after.id`` directly: a raw int raises
+                    # ``'int' object has no attribute 'id'``. Wrap in
+                    # ``discord.Object`` to satisfy the strategy without
+                    # triggering a real fetch.
+                    kwargs["after"] = discord.Object(id=after_id)
                 batch_count = 0
                 async for msg in channel.history(**kwargs):
                     added = await self._run_parser(
