@@ -251,10 +251,16 @@ class Indexer(commands.Cog):
         out: list[discord.Thread] = []
         # Step 1: forum-local cached threads (``forum.threads`` is a
         # property exposing the gateway cache). May be None / incomplete
-        # during partial state; treat as empty.
+        # during partial state; treat as empty. We gate on ``isinstance``
+        # so a non-Thread entry in the cache (rare but possible during a
+        # gateway reconnect) is silently skipped instead of crashing
+        # the backfill on its first attribute access.
         try:
             for thread in (getattr(forum, "threads", None) or []):
-                if thread.id not in seen:
+                if (
+                    isinstance(thread, discord.Thread)
+                    and thread.id not in seen
+                ):
                     seen.add(thread.id)
                     out.append(thread)
         except (AttributeError, TypeError) as exc:
@@ -280,7 +286,19 @@ class Indexer(commands.Cog):
             )
             guild_active = []
         for thread in guild_active:
-            if thread.parent_id == forum.id and thread.id not in seen:
+            # Belt-and-suspenders: in partial-state gateway caches,
+            # ``guild.active_threads`` may briefly contain entries
+            # without a ``.parent_id`` or ``.id`` attribute. Without
+            # this guard, a non-Thread entry here raises AttributeError
+            # on the first attribute access below and aborts the forum
+            # scan. ``isinstance`` keeps the loop robust against
+            # transient cache oddities -- the cache is purely a
+            # freshness optimization, never a hard requirement.
+            if (
+                isinstance(thread, discord.Thread)
+                and thread.parent_id == forum.id
+                and thread.id not in seen
+            ):
                 seen.add(thread.id)
                 out.append(thread)
         return out
