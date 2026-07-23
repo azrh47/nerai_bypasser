@@ -1,5 +1,5 @@
-"""Tests for ``cogs.indexer._message_text``, ``_component_urls``, and the
-SOURCE_GUILD_IDS allow-list semantics.
+"""Tests for ``cogs.indexer._message_text``, ``_component_urls``, ``_resolve_source_cid``,
+SOURCE_GUILD_IDS allow-list semantics, and ForumChannel indexing.
 
 These guard against the most common source-channel message shape we saw in
 real-world repack reposts: the download URL is hidden inside a Discord
@@ -8,13 +8,24 @@ real-world repack reposts: the download URL is hidden inside a Discord
 The multi-guild tests pin down the allow-list contract: when the operator
 sets ``SOURCE_GUILD_IDS`` they mean it, and a message from an unlisted guild
 must never reach the parser regardless of how it got into the channel list.
+
+The forum tests pin the ForumChannel indexing contract: a ``MagicMock`` of
+``discord.ForumChannel`` must walk its threads and persist entries whose
+``source_channel_id`` is the FORUM id (so /admin stats groups by forum).
 """
 from __future__ import annotations
 
 import asyncio
+
+import discord
 from unittest.mock import AsyncMock, MagicMock
 
-from cogs.indexer import Indexer, _component_urls, _message_text
+from cogs.indexer import (
+    Indexer,
+    _component_urls,
+    _message_text,
+    _resolve_source_cid,
+)
 
 
 def _mock_message(
@@ -69,13 +80,26 @@ def _mock_msg_in_channel(
 
 
 def _make_indexer(monkeypatch) -> Indexer:
-    """Index the cog with mock bot + db + steam. Returns the cog."""
+    """Build an Indexer with mock bot/db/steam.
+
+    Pre-mocks every db method that ``index_channel`` or ``on_message``
+    awaits so tests don't have to mock them per-call. Tests that need to
+    inspect a specific db call override the relevant ``AsyncMock``
+    attribute after this helper returns.
+    """
     bot = MagicMock()
     db = MagicMock()
     steam = MagicMock()
     indexer = Indexer(bot, db, steam)
+    # Per-message ingest path (used by on_message + _run_parser).
     db.upsert_entry = AsyncMock(return_value=1)
     db.update_source_progress = AsyncMock(return_value=None)
+    # Channel-state path (used by index_channel + _backfill_all). Without
+    # these, ``await self.db.upsert_source(...)`` etc. raise
+    # ``TypeError: 'MagicMock' object can't be awaited``.
+    db.upsert_source = AsyncMock(return_value=None)
+    db.set_source_status = AsyncMock(return_value=None)
+    db.get_source = AsyncMock(return_value=None)
     return indexer
 
 
@@ -437,3 +461,257 @@ def test_no_phantom_promotion_when_legacy_zero(monkeypatch):
     # Helper stays permissive regardless of legacy value.
     assert config.guild_allowed(42) is True
     assert config.guild_allowed(None) is True
+
+
+# ---------- _resolve_source_cid --------------------------------------------
+#
+# The indexer recognizes a "source message" by the CONTAINER channel that
+# holds it. For a direct text-channel message, that's the channel's own id;
+# for a message inside a thread (a "post" inside a forum), that's the
+# PARENT (the forum). Without this distinction, every forum post would be
+# silently dropped by ``on_message`` because ``message.channel.id`` is the
+# thread id, not the forum we registered in ``SOURCE_CHANNELS``.
+
+
+def test_resolve_source_cid_returns_channel_id_for_textchannel():
+    msg = MagicMock(spec=discord.Message)
+    msg.channel = MagicMock(spec=discord.TextChannel)
+    msg.channel.id = 555
+    assert _resolve_source_cid(msg) == 555
+
+
+def test_resolve_source_cid_returns_parent_id_for_thread_under_forum():
+    msg = MagicMock(spec=discord.Message)
+    msg.channel = MagicMock(spec=discord.Thread)
+    msg.channel.id = 8888  # the thread (post) id
+    msg.channel.parent_id = 777  # the parent forum
+    assert _resolve_source_cid(msg) == 777
+
+
+def test_resolve_source_cid_returns_none_for_missing_channel():
+    msg = MagicMock(spec=[])
+    msg.channel = None
+    assert _resolve_source_cid(msg) is None
+
+
+# ---------- on_message handling forum-post threads -------------------------
+
+
+def test_on_message_in_thread_persists_entry_with_forum_channel_id(monkeypatch):
+    """A live message posted inside a thread whose parent is in
+    SOURCE_CHANNELS must be indexed; the persisted ``source_channel_id`` is
+    the FORUM id, not the thread id, so /admin stats correctly groups
+    messages by forum.
+    """
+    import config
+
+    monkeypatch.setattr(config, "SOURCE_CHANNELS", [777], raising=False)
+    monkeypatch.setattr(config, "SOURCE_GUILD_IDS", [100], raising=False)
+
+    indexer = _make_indexer(monkeypatch)
+    msg = MagicMock(spec=discord.Message)
+    msg.id = 9001
+    msg.channel = MagicMock(spec=discord.Thread)
+    msg.channel.id = 8888  # thread id -- NOT in SOURCE_CHANNELS
+    msg.channel.parent_id = 777  # forum id -- in SOURCE_CHANNELS
+    msg.guild = MagicMock()
+    msg.guild.id = 100  # in SOURCE_GUILD_IDS
+    msg.author = MagicMock()
+    msg.author.id = 42
+    msg.author.bot = False
+    msg.created_at = None
+    msg.content = "https://mega.nz/file/AAaa#BBbb"
+    msg.embeds = []
+    msg.components = []
+
+    asyncio.run(indexer.on_message(msg))
+
+    assert indexer.db.upsert_entry.await_count == 1
+    entry = indexer.db.upsert_entry.await_args.args[0]
+    assert entry["source_channel_id"] == 777
+    indexer.db.update_source_progress.assert_awaited_once_with(777, 9001)
+
+
+def test_on_message_drops_thread_in_unindexed_forum(monkeypatch):
+    """A Thread whose parent_id is NOT in SOURCE_CHANNELS must be silently
+    dropped. Otherwise the indexer would inadvertently index every active
+    thread on the bot's home guild, which is both wasteful and rate-limit
+    dangerous.
+    """
+    import config
+
+    monkeypatch.setattr(config, "SOURCE_CHANNELS", [777], raising=False)
+    monkeypatch.setattr(config, "SOURCE_GUILD_IDS", [100], raising=False)
+
+    indexer = _make_indexer(monkeypatch)
+    msg = MagicMock(spec=discord.Message)
+    msg.id = 9002
+    msg.channel = MagicMock(spec=discord.Thread)
+    msg.channel.id = 8888
+    msg.channel.parent_id = 999  # NOT in SOURCE_CHANNELS
+    msg.guild = MagicMock()
+    msg.guild.id = 100
+    msg.author = MagicMock()
+    msg.author.id = 42
+    msg.author.bot = False
+
+    asyncio.run(indexer.on_message(msg))
+    assert indexer.db.upsert_entry.await_count == 0
+
+
+def test_on_message_textchannel_keeps_channel_id(monkeypatch):
+    """Regression pin: a direct TextChannel message must still resolve to
+    the channel's own id (NOT parent_id which is None for top-level
+    channels). This guards against ``channel.parent_id`` being used
+    blindly in on_message.
+    """
+    import config
+
+    monkeypatch.setattr(config, "SOURCE_CHANNELS", [555], raising=False)
+    monkeypatch.setattr(config, "SOURCE_GUILD_IDS", [100], raising=False)
+    indexer = _make_indexer(monkeypatch)
+
+    msg = MagicMock(spec=discord.Message)
+    msg.id = 9003
+    msg.channel = MagicMock(spec=discord.TextChannel)
+    msg.channel.id = 555
+    msg.channel.parent_id = None
+    msg.guild = MagicMock()
+    msg.guild.id = 100
+    msg.author = MagicMock()
+    msg.author.id = 42
+    msg.author.bot = False
+    msg.created_at = None
+    msg.content = "https://mega.nz/file/CCcc#DDdd"
+    msg.embeds = []
+    msg.components = []
+
+    asyncio.run(indexer.on_message(msg))
+    entry = indexer.db.upsert_entry.await_args.args[0]
+    assert entry["source_channel_id"] == 555
+
+
+# ---------- ForumChannel backfill -----------------------------------------
+
+
+def test_index_channel_forum_persists_with_forum_id(monkeypatch):
+    """A ForumChannel whose single accessible thread contains a Mega URL
+    must produce a persisted entry whose ``source_channel_id`` is the
+    FORUM id -- NOT the thread id -- so /admin stats groups by forum.
+    """
+    import config
+
+    monkeypatch.setattr(config, "SOURCE_CHANNELS", [777], raising=False)
+    monkeypatch.setattr(config, "SOURCE_GUILD_IDS", [100], raising=False)
+    indexer = _make_indexer(monkeypatch)
+
+    msg = MagicMock(spec=discord.Message)
+    msg.id = 12345
+    msg.author = MagicMock()
+    msg.author.id = 1
+    msg.author.bot = False
+    msg.created_at = None
+    msg.content = "https://mega.nz/file/AbCd#EfGh"
+    msg.embeds = []
+    msg.components = []
+
+    async def fake_history(**kwargs):
+        yield msg
+
+    # ``MagicMock(spec=discord.ForumChannel)`` makes the mock pass
+    # ``isinstance(_, discord.ForumChannel)`` on modern Python -- required
+    # to clear the indexer's type gate. A plain class would fall through
+    # to ``status="wrong_type"``.
+    forum = MagicMock(spec=discord.ForumChannel)
+    forum.id = 777
+    forum.guild = MagicMock()
+    forum.guild.id = 100
+    forum.guild.fetch_active_threads = AsyncMock(return_value=[])
+
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = 8001
+    thread.parent_id = 777
+
+    async def thread_history(**kwargs):
+        async for m in fake_history(**kwargs):
+            yield m
+
+    thread.history = thread_history
+    forum.threads = [thread]
+
+    indexer.bot.get_channel = MagicMock(return_value=forum)
+
+    result = asyncio.run(indexer.index_channel(777, 100))
+    assert result["error"] is None
+    assert indexer.db.upsert_entry.await_count == 1
+    entry = indexer.db.upsert_entry.await_args.args[0]
+    assert entry["source_channel_id"] == 777
+    assert entry["mega_url"] == "https://mega.nz/file/AbCd#EfGh"
+
+
+def test_index_channel_forum_no_threads_is_ok(monkeypatch):
+    """A ForumChannel with zero accessible threads is a valid (empty)
+    indexer pass; we should not error out and the parser should not be
+    invoked."""
+    import config
+
+    monkeypatch.setattr(config, "SOURCE_CHANNELS", [777], raising=False)
+    monkeypatch.setattr(config, "SOURCE_GUILD_IDS", [100], raising=False)
+    indexer = _make_indexer(monkeypatch)
+
+    # ``MagicMock(spec=discord.ForumChannel)`` is required so the
+    # indexer's type gate accepts the mock (isinstance passes on modern
+    # Python). A plain class would short-circuit into ``status="wrong_type"``.
+    forum = MagicMock(spec=discord.ForumChannel)
+    forum.id = 777
+    forum.threads = []
+    forum.guild = MagicMock()
+    forum.guild.id = 100
+    forum.guild.fetch_active_threads = AsyncMock(return_value=[])
+
+    indexer.bot.get_channel = MagicMock(return_value=forum)
+
+    result = asyncio.run(indexer.index_channel(777, 100))
+    assert result["error"] is None
+    assert result["indexed"] == 0
+    assert indexer.db.upsert_entry.await_count == 0
+
+
+def test_index_channel_text_channel_unchanged(monkeypatch):
+    """Regression pin: a regular TextChannel must still walk its history
+    with the tight loop, persist entries, and return error=None. This is
+    the original pre-ForumChannel behavior -- if this test breaks the
+    old path regressed.
+    """
+    import config
+
+    monkeypatch.setattr(config, "SOURCE_CHANNELS", [555], raising=False)
+    monkeypatch.setattr(config, "SOURCE_GUILD_IDS", [100], raising=False)
+    indexer = _make_indexer(monkeypatch)
+
+    msg = MagicMock(spec=discord.Message)
+    msg.id = 42
+    msg.author = MagicMock()
+    msg.author.id = 1
+    msg.author.bot = False
+    msg.created_at = None
+    msg.content = "https://mega.nz/file/EEEfff#GGGhhh"
+    msg.embeds = []
+    msg.components = []
+
+    async def fake_history(**kwargs):
+        yield msg
+
+    ch = MagicMock(spec=discord.TextChannel)
+    ch.id = 555
+    ch.guild = MagicMock()
+    ch.guild.id = 100
+    ch.history = fake_history
+
+    indexer.bot.get_channel = MagicMock(return_value=ch)
+
+    result = asyncio.run(indexer.index_channel(555, 100))
+    assert result["error"] is None
+    assert indexer.db.upsert_entry.await_count == 1
+    entry = indexer.db.upsert_entry.await_args.args[0]
+    assert entry["source_channel_id"] == 555

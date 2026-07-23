@@ -10,6 +10,15 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
+# Sanity-check the install: fail the Docker build loudly with a clear
+# log line if discord.py didn't actually land in site-packages. This
+# catches the "Build logs say Successfully installed discord.py but
+# runtime says ModuleNotFoundError: No module named 'discord'" failure
+# mode, which historically meant Render was silently using the Python
+# buildpack instead of this Dockerfile. Cheap insurance — the build
+# breaks at a grep-able line instead of failing hours later in prod.
+RUN python -c "import discord; print('discord.py OK:', discord.__version__)"
+
 # Copy the application source.
 COPY . .
 
