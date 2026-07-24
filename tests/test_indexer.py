@@ -269,7 +269,8 @@ def test_link_channel_rejects_channel_in_unlisted_guild(monkeypatch):
 
     # 888 is NOT in SOURCE_GUILD_IDS=[777] -- call the un-decorated impl
     # so we don't have to navigate the @admin.command Command wrapping.
-    asyncio.run(adm._link_channel_impl(interaction, FakeChannel(555, 888)))
+    adm.bot.get_channel = MagicMock(return_value=FakeChannel(555, 888))
+    asyncio.run(adm._link_channel_impl(interaction, "555"))
     interaction.response.send_message.assert_awaited_once()
     # The cog passes content positionally, ephemeral as kwarg. Read args[0].
     msg = interaction.response.send_message.await_args.args[0]
@@ -310,8 +311,9 @@ def test_link_channel_kicks_off_indexer_backfill_when_present(monkeypatch):
     interaction = MagicMock()
     interaction.user.id = 1
     interaction.response.send_message = AsyncMock()
-
-    asyncio.run(adm._link_channel_impl(interaction, FakeChannel(555, 777)))
+    
+    adm.bot.get_channel = MagicMock(return_value=FakeChannel(555, 777))
+    asyncio.run(adm._link_channel_impl(interaction, "555"))
     indexer.index_channel.assert_awaited_once_with(
         555, 777, reseed=True
     )
@@ -379,7 +381,8 @@ def test_link_channel_accepts_channel_in_listed_guild(monkeypatch):
     interaction.user.id = 1
     interaction.response.send_message = AsyncMock()
 
-    asyncio.run(adm._link_channel_impl(interaction, FakeChannel(555, 777)))
+    adm.bot.get_channel = MagicMock(return_value=FakeChannel(555, 777))
+    asyncio.run(adm._link_channel_impl(interaction, "555"))
     # Cog calls send_message(content_str, *, ephemeral=True) so content is
     # positional. Pull args[0] to read the user-visible message.
     msg = interaction.response.send_message.await_args.args[0]

@@ -99,7 +99,7 @@ class Admin(commands.Cog):
     async def reseed_cmd(
         self,
         interaction: discord.Interaction,
-        channel: discord.abc.GuildChannel,
+        channel_id_str: str,
     ) -> None:
         if not _is_admin(interaction):
             await interaction.response.send_message(
@@ -107,6 +107,13 @@ class Admin(commands.Cog):
             )
             return
         await interaction.response.defer(thinking=True, ephemeral=True)
+        try:
+            channel_id = int(channel_id_str)
+            channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+        except (ValueError, discord.NotFound, discord.Forbidden):
+            await interaction.followup.send("Invalid or inaccessible channel ID.", ephemeral=True)
+            return
+
         indexer = self.bot.get_cog("Indexer")
         if indexer is None:
             await interaction.followup.send(
@@ -214,23 +221,31 @@ class Admin(commands.Cog):
     async def link_channel_cmd(
         self,
         interaction: discord.Interaction,
-        channel: discord.abc.GuildChannel,
+        channel_id_str: str,
     ) -> None:
         # Public binding is a thin wrapper around `_link_channel_impl` so the
         # underlying logic stays callable from tests without the
         # `app_commands`/`Group` decorator wrapping it into a Command object.
-        return await self._link_channel_impl(interaction, channel)
+        return await self._link_channel_impl(interaction, channel_id_str)
 
     async def _link_channel_impl(
         self,
         interaction: discord.Interaction,
-        channel: discord.abc.GuildChannel,
+        channel_id_str: str,
     ) -> None:
         if not _is_admin(interaction):
             await interaction.response.send_message(
                 "Admin only.", ephemeral=True
             )
             return
+            
+        try:
+            channel_id = int(channel_id_str)
+            channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+        except (ValueError, discord.NotFound, discord.Forbidden):
+            await interaction.response.send_message("Invalid or inaccessible channel ID.", ephemeral=True)
+            return
+            
         if not config.guild_allowed(channel.guild.id):
             allowed = ", ".join(str(g) for g in config.SOURCE_GUILD_IDS)
             await interaction.response.send_message(
@@ -276,19 +291,26 @@ class Admin(commands.Cog):
     async def unlink_channel_cmd(
         self,
         interaction: discord.Interaction,
-        channel: discord.abc.GuildChannel,
+        channel_id_str: str,
     ) -> None:
         if not _is_admin(interaction):
             await interaction.response.send_message(
                 "Admin only.", ephemeral=True
             )
             return
-        if channel.id in config.SOURCE_CHANNELS:
-            config.SOURCE_CHANNELS.remove(channel.id)
+            
+        try:
+            channel_id = int(channel_id_str)
+        except ValueError:
+            await interaction.response.send_message("Invalid channel ID.", ephemeral=True)
+            return
+
+        if channel_id in config.SOURCE_CHANNELS:
+            config.SOURCE_CHANNELS.remove(channel_id)
             await self.db.set_setting(
                 "source_channels", json.dumps(config.SOURCE_CHANNELS)
             )
-            await self.db.set_source_status(channel.id, "unlinked")
+            await self.db.set_source_status(channel_id, "unlinked")
         await interaction.response.send_message(
-            f"✅ Stopped indexing <#{channel.id}>.", ephemeral=True
+            f"✅ Stopped indexing <#{channel_id}>.", ephemeral=True
         )
