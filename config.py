@@ -58,8 +58,15 @@ DISCORD_TOKEN: str = _require("DISCORD_TOKEN")
 
 # Optional with sensible defaults -----------------------------------------
 
-# User-facing server where /get, /search are issued.
-TARGET_GUILD_ID: int = _optional_int("TARGET_GUILD_ID", 0)
+# User-facing server(s) where /get, /search are issued.
+TARGET_GUILD_IDS: list[int] = _optional_int_list("TARGET_GUILD_IDS")
+if not TARGET_GUILD_IDS:
+    legacy_target = _optional_int("TARGET_GUILD_ID", 0)
+    if legacy_target:
+        TARGET_GUILD_IDS = [legacy_target]
+
+# Deprecated single-int alias for backwards compat
+TARGET_GUILD_ID: int = TARGET_GUILD_IDS[0] if TARGET_GUILD_IDS else 0
 
 # Source server(s) where Mega.nz links are posted (the bot must be a member
 # of every listed guild). Accepts either:
@@ -131,6 +138,7 @@ MEGA_STALENESS_CHECK: bool = os.getenv("MEGA_STALENESS_CHECK", "false").lower() 
 def env_summary() -> dict[str, Any]:
     """Return a redacted summary for /admin stats and startup logs."""
     return {
+        "target_guild_ids": list(TARGET_GUILD_IDS),
         "target_guild_id": TARGET_GUILD_ID or None,
         "source_guild_ids": list(SOURCE_GUILD_IDS),
         "source_guilds_configured": len(SOURCE_GUILD_IDS),
@@ -144,6 +152,7 @@ def env_summary() -> dict[str, Any]:
 
 __all__ = [
     "DISCORD_TOKEN",
+    "TARGET_GUILD_IDS",
     "TARGET_GUILD_ID",
     "SOURCE_GUILD_IDS",
     "SOURCE_GUILD_ID",

@@ -151,14 +151,12 @@ class GameIndexerBot(commands.Bot):
         await self.add_cog(Search(self, self.db, self.steam))
         await self.add_cog(Admin(self, self.db, self.steam))
 
-        if config.TARGET_GUILD_ID:
-            guild = discord.Object(id=config.TARGET_GUILD_ID)
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            logging.info(
-                "Synced slash commands to guild %s",
-                config.TARGET_GUILD_ID,
-            )
+        if config.TARGET_GUILD_IDS:
+            for gid in config.TARGET_GUILD_IDS:
+                guild = discord.Object(id=gid)
+                self.tree.copy_global_to(guild=guild)
+                await self.tree.sync(guild=guild)
+                logging.info("Synced slash commands to guild %s", gid)
         else:
             await self.tree.sync()
             logging.info("Synced slash commands globally")

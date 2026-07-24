@@ -51,8 +51,7 @@ public channels.
    and your user-facing server.
 7. In each server, enable Developer Mode (Settings → Advanced), then
    right-click the server icon → **Copy Server ID** → for source servers
-   this becomes one entry in `SOURCE_GUILD_IDS` (comma-separated). For your
-   user-facing server it's `TARGET_GUILD_ID`. Same trick on the source
+   user-facing server it's `TARGET_GUILD_IDS` (comma-separated, allowing multiple servers). Same trick on the source
    channel → `SOURCE_CHANNELS` (also comma-separated).
 
 ### 2. Local clone & install
@@ -77,7 +76,7 @@ On first launch the bot will:
 
 1. Create `data/bot.sqlite` from `schema.sql`.
 2. Fetch the Steam app list (~150k entries) and cache it locally (~10 s).
-3. Sync slash commands to your `TARGET_GUILD_ID`.
+3. Sync slash commands to your `TARGET_GUILD_IDS` (or globally if none are set).
 4. Start backfilling every `SOURCE_CHANNELS` id.
 
 Logs go to stdout. Watch for `Indexed <channel_id>` lines.
@@ -221,7 +220,7 @@ sample message into `/admin parser_test`; iterate on the regexes in
 
 | Symptom | Likely cause |
 |---------|--------------|
-| Slash commands don't show up in Discord | Either `TARGET_GUILD_ID` is wrong, or the bot was kicked from the server. Re-invite with the OAuth2 URL. |
+| Slash commands don't show up in Discord | Either `TARGET_GUILD_IDS` is wrong, or the bot was kicked from the server. Re-invite with the OAuth2 URL. |
 | Bot logs `Forbidden during backfill` | Bot was added to the source server without `Read Message History` permission. Re-authorize. |
 | `/get <anything>` returns "no matches" | The bot has not yet indexed those entries. Run `/admin stats` to see counts. If 0, run `/admin reseed <source_channel>`. |
 | `/get` autocomplete is empty | Steam cache is stale. Try `/admin refresh_steam`. Requires `Message Content Intent` enabled. |
