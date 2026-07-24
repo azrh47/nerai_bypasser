@@ -457,6 +457,30 @@ class Indexer(commands.Cog):
         last: int = 0
         indexed: int = 0
         local_after = after_id
+        
+        # discord.py's `thread.history()` only iterates the replies, NOT the 
+        # starter message. In a forum, the starter message is where the links are.
+        # The starter message ID is exactly the thread's ID, and it lives in the parent.
+        if after_id is None or thread.id > after_id:
+            try:
+                parent = getattr(thread, "parent", None)
+                if parent:
+                    # fetch_message on the parent gets the starter message
+                    starter_msg = await parent.fetch_message(thread.id)
+                    added = await self._run_parser(
+                        starter_msg, source_channel_id=source_channel_id
+                    )
+                    indexed += added
+                    last = max(last, thread.id)
+            except discord.NotFound:
+                # Starter message might have been deleted; that's fine.
+                pass
+            except discord.HTTPException as exc:
+                logger.warning(
+                    "Failed to fetch starter message for thread %s: %s", 
+                    thread.id, exc
+                )
+
         while True:
             kwargs: dict[str, object] = {
                 "limit": HISTORY_FETCH_BATCH,

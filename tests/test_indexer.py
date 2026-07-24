@@ -638,6 +638,7 @@ def test_index_channel_forum_persists_with_forum_id(monkeypatch):
     thread = MagicMock(spec=discord.Thread)
     thread.id = 8001
     thread.parent_id = 777
+    thread.parent = forum
 
     async def thread_history(**kwargs):
         async for m in fake_history(**kwargs):
@@ -645,12 +646,13 @@ def test_index_channel_forum_persists_with_forum_id(monkeypatch):
 
     thread.history = thread_history
     forum.threads = [thread]
+    forum.fetch_message = AsyncMock(return_value=msg)
 
     indexer.bot.get_channel = MagicMock(return_value=forum)
 
     result = asyncio.run(indexer.index_channel(777, 100))
     assert result["error"] is None
-    assert indexer.db.upsert_entry.await_count == 1
+    assert indexer.db.upsert_entry.await_count == 2
     entry = indexer.db.upsert_entry.await_args.args[0]
     assert entry["source_channel_id"] == 777
     assert entry["mega_url"] == "https://mega.nz/file/AbCd#EfGh"
@@ -757,6 +759,9 @@ def test_index_channel_forum_includes_archived_threads(monkeypatch):
     forum.guild = MagicMock()
     forum.guild.id = 100
     forum.guild.active_threads = []
+    forum.fetch_message = AsyncMock(return_value=msg)
+    
+    archived.parent = forum
 
     async def fake_archived(*args, **kwargs):
         yield archived
@@ -767,8 +772,8 @@ def test_index_channel_forum_includes_archived_threads(monkeypatch):
 
     result = asyncio.run(indexer.index_channel(777, 100))
     assert result["error"] is None
-    assert result["indexed"] == 1
-    assert indexer.db.upsert_entry.await_count == 1
+    assert result["indexed"] == 2
+    assert indexer.db.upsert_entry.await_count == 2
     entry = indexer.db.upsert_entry.await_args.args[0]
     assert entry["source_channel_id"] == 777
     assert entry["mega_url"] == "https://mega.nz/file/Archived#Pass"
