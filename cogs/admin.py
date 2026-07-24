@@ -99,7 +99,7 @@ class Admin(commands.Cog):
     async def reseed_cmd(
         self,
         interaction: discord.Interaction,
-        channel: discord.TextChannel,
+        channel: discord.abc.GuildChannel,
     ) -> None:
         if not _is_admin(interaction):
             await interaction.response.send_message(
@@ -214,7 +214,7 @@ class Admin(commands.Cog):
     async def link_channel_cmd(
         self,
         interaction: discord.Interaction,
-        channel: discord.TextChannel,
+        channel: discord.abc.GuildChannel,
     ) -> None:
         # Public binding is a thin wrapper around `_link_channel_impl` so the
         # underlying logic stays callable from tests without the
@@ -224,7 +224,7 @@ class Admin(commands.Cog):
     async def _link_channel_impl(
         self,
         interaction: discord.Interaction,
-        channel: discord.TextChannel,
+        channel: discord.abc.GuildChannel,
     ) -> None:
         if not _is_admin(interaction):
             await interaction.response.send_message(
@@ -276,7 +276,7 @@ class Admin(commands.Cog):
     async def unlink_channel_cmd(
         self,
         interaction: discord.Interaction,
-        channel: discord.TextChannel,
+        channel: discord.abc.GuildChannel,
     ) -> None:
         if not _is_admin(interaction):
             await interaction.response.send_message(
