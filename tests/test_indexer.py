@@ -638,15 +638,14 @@ def test_index_channel_forum_persists_with_forum_id(monkeypatch):
     thread = MagicMock(spec=discord.Thread)
     thread.id = 8001
     thread.parent_id = 777
-    thread.parent = forum
 
     async def thread_history(**kwargs):
         async for m in fake_history(**kwargs):
             yield m
 
     thread.history = thread_history
+    thread.fetch_message = AsyncMock(return_value=msg)
     forum.threads = [thread]
-    forum.fetch_message = AsyncMock(return_value=msg)
 
     indexer.bot.get_channel = MagicMock(return_value=forum)
 
@@ -752,6 +751,7 @@ def test_index_channel_forum_includes_archived_threads(monkeypatch):
     archived.id = 9001
     archived.parent_id = 777
     archived.history = thread_history
+    archived.fetch_message = AsyncMock(return_value=msg)
 
     forum = MagicMock(spec=discord.ForumChannel)
     forum.id = 777
@@ -759,9 +759,6 @@ def test_index_channel_forum_includes_archived_threads(monkeypatch):
     forum.guild = MagicMock()
     forum.guild.id = 100
     forum.guild.active_threads = []
-    forum.fetch_message = AsyncMock(return_value=msg)
-    
-    archived.parent = forum
 
     async def fake_archived(*args, **kwargs):
         yield archived
