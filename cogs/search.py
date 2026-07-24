@@ -297,7 +297,7 @@ class Search(commands.Cog):
             try:
                 steam_populated = await self.steam.size() > 0
                 if steam_populated:
-                    fuzzy = await self.steam.fuzzy_lookup_id(game_name, limit=1, score_cutoff=85)
+                    fuzzy = await self.steam.fuzzy_lookup_id(game_name, limit=1, score_cutoff=75)
                     if fuzzy:
                         app_id = fuzzy[0][0]
             except Exception:
