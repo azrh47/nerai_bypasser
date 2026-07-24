@@ -53,6 +53,13 @@ MEDIAFIRE_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# transfer.it URLs:
+#   https://transfer.it/t/XXXXXXXXXXXX
+TRANSFER_IT_URL_RE = re.compile(
+    r"https?://transfer\.it/t/[A-Za-z0-9_\-]+",
+    re.IGNORECASE,
+)
+
 # store.steampowered.com/app/<id>  -> app_id
 STEAM_APP_URL_RE = re.compile(
     r"store\.steampowered\.com/app/(\d+)", re.IGNORECASE
@@ -288,16 +295,21 @@ def parse_message(
     if not text:
         return []
 
-    # Walk Mega and MediaFire regexes, dedupe by full URL.
+    # Walk Mega, MediaFire, and transfer.it regexes, dedupe by full URL.
     matches: list[tuple[str, bool]] = []  # (full_url, is_folder)
     seen: set[str] = set()
-    for pattern in (MEGA_URL_RE, MEDIAFIRE_URL_RE):
+    for pattern in (MEGA_URL_RE, MEDIAFIRE_URL_RE, TRANSFER_IT_URL_RE):
         for m in pattern.finditer(text):
             url = m.group(0)
             if url in seen:
                 continue
             seen.add(url)
-            matches.append((url, m.group(1).lower() == "folder"))
+            # Mega and Mediafire use group(1) for file vs folder.
+            # Transfer.it doesn't have folder paths in the regex.
+            is_folder = False
+            if m.lastindex and m.lastindex >= 1:
+                is_folder = m.group(1).lower() == "folder"
+            matches.append((url, is_folder))
 
     if not matches:
         return []
