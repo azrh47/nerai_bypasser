@@ -349,14 +349,10 @@ class Search(commands.Cog):
         
         embed.description += dl_text
         
-        if developers:
-            embed.add_field(name="👨‍💻 Developer", value=escape_markdown(developers), inline=True)
-        if publishers:
-            embed.add_field(name="🏢 Publisher", value=escape_markdown(publishers), inline=True)
-        if release_date:
-            embed.add_field(name="📅 Released", value=escape_markdown(release_date), inline=True)
-        if genres:
-            embed.add_field(name="🎮 Genre", value=escape_markdown(genres), inline=True)
+        embed.add_field(name="👨‍💻 Developer", value=escape_markdown(developers) if developers else "Unknown", inline=True)
+        embed.add_field(name="🏢 Publisher", value=escape_markdown(publishers) if publishers else "Unknown", inline=True)
+        embed.add_field(name="📅 Released", value=escape_markdown(release_date) if release_date else "Unknown", inline=True)
+        embed.add_field(name="🎮 Genre", value=escape_markdown(genres) if genres else "Unknown", inline=True)
             
         embed.add_field(name="🛡️ Denuvo", value="No / Unknown", inline=True)
         
