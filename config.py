@@ -114,6 +114,8 @@ def guild_allowed(guild_id: Optional[int]) -> bool:
 # Optional role gate in TARGET_GUILD_ID for the user-facing commands.
 ALLOWED_ROLE_NAME: Optional[str] = os.getenv("ALLOWED_ROLE_NAME") or None
 
+STEAM_API_KEY: str = os.getenv("STEAM_API_KEY", "").strip()
+
 # Admin user IDs (may use /admin reseed, /admin stats, etc.).
 ADMIN_USER_IDS: list[int] = _optional_int_list("ADMIN_USER_IDS")
 

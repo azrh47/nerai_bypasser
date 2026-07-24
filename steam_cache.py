@@ -18,9 +18,11 @@ from typing import Optional
 import aiosqlite
 import httpx
 
+import config
+
 logger = logging.getLogger(__name__)
 
-STEAM_APPLIST_URL = "https://api.steampowered.com/ISteamApps/GetAppList/v2/"
+STEAM_APPLIST_URL = "https://api.steampowered.com/IStoreService/GetAppList/v1/"
 
 
 class SteamCache:
@@ -65,20 +67,45 @@ class SteamCache:
     async def refresh(self) -> int:
         """Fetch the full Steam app list and replace the cache. Returns count stored."""
         async with self._lock:
+            if not config.STEAM_API_KEY:
+                logger.error("STEAM_API_KEY is not set. Cannot fetch Steam app list. Set it in .env.")
+                return 0
+
             logger.info("Fetching Steam app list from %s", STEAM_APPLIST_URL)
+            applist = []
+            last_appid = 0
+            have_more_results = True
+            
             try:
                 async with httpx.AsyncClient(timeout=30) as client:
-                    response = await client.get(STEAM_APPLIST_URL)
-                    response.raise_for_status()
-                    payload = response.json()
+                    while have_more_results:
+                        params = {
+                            "key": config.STEAM_API_KEY,
+                            "max_results": 50000,
+                            "last_appid": last_appid
+                        }
+                        response = await client.get(STEAM_APPLIST_URL, params=params)
+                        response.raise_for_status()
+                        payload = response.json().get("response", {})
+                        
+                        apps = payload.get("apps", [])
+                        applist.extend(apps)
+                        
+                        have_more_results = payload.get("have_more_results", False)
+                        last_appid = payload.get("last_appid", last_appid)
+                        
+                        if not apps:
+                            break
+                            
             except (httpx.HTTPError, ValueError) as exc:
                 logger.warning(
                     "Failed to fetch Steam app list (%s). Cache unchanged.", exc
                 )
                 return 0
 
-            applist = payload.get("applist", {}).get("apps", [])
             logger.info("Steam returned %d apps", len(applist))
+            if not applist:
+                return 0
 
             async with aiosqlite.connect(self.db_path) as conn:
                 await conn.execute("BEGIN")
