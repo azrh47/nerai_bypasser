@@ -254,9 +254,13 @@ class Search(commands.Cog):
         )
 
     async def _fetch_steam_details(self, app_id: int) -> dict:
-        url = f"https://store.steampowered.com/api/appdetails?appids={app_id}"
+        url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&cc=us&l=english"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json"
+        }
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=10, headers=headers) as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 data = response.json()
@@ -312,11 +316,11 @@ class Search(commands.Cog):
         price_overview = steam_data.get("price_overview", {})
         price = "Free" if is_free else price_overview.get("final_formatted", "Price N/A")
         
-        developers = ", ".join(steam_data.get("developers", [])) or "Unknown"
-        publishers = ", ".join(steam_data.get("publishers", [])) or "Unknown"
+        developers = ", ".join(steam_data.get("developers", []))
+        publishers = ", ".join(steam_data.get("publishers", []))
         
-        release_date = steam_data.get("release_date", {}).get("date", "Unknown")
-        genres = ", ".join([g["description"] for g in steam_data.get("genres", [])]) or "Unknown"
+        release_date = steam_data.get("release_date", {}).get("date", "")
+        genres = ", ".join([g["description"] for g in steam_data.get("genres", [])])
         
         header_image = steam_data.get("header_image")
 
@@ -345,10 +349,15 @@ class Search(commands.Cog):
         
         embed.description += dl_text
         
-        embed.add_field(name="👨‍💻 Developer", value=escape_markdown(developers), inline=True)
-        embed.add_field(name="🏢 Publisher", value=escape_markdown(publishers), inline=True)
-        embed.add_field(name="📅 Released", value=escape_markdown(release_date), inline=True)
-        embed.add_field(name="🎮 Genre", value=escape_markdown(genres), inline=True)
+        if developers:
+            embed.add_field(name="👨‍💻 Developer", value=escape_markdown(developers), inline=True)
+        if publishers:
+            embed.add_field(name="🏢 Publisher", value=escape_markdown(publishers), inline=True)
+        if release_date:
+            embed.add_field(name="📅 Released", value=escape_markdown(release_date), inline=True)
+        if genres:
+            embed.add_field(name="🎮 Genre", value=escape_markdown(genres), inline=True)
+            
         embed.add_field(name="🛡️ Denuvo", value="No / Unknown", inline=True)
         
         if header_image:
