@@ -18,6 +18,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from discord.utils import escape_markdown
+import httpx
 
 import config
 from database import Database
@@ -252,6 +253,28 @@ class Search(commands.Cog):
             reverse=True,
         )
 
+    async def _fetch_steam_details(self, app_id: int) -> dict:
+        url = f"https://store.steampowered.com/api/appdetails?appids={app_id}"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+                if data and str(app_id) in data and data[str(app_id)].get("success"):
+                    return data[str(app_id)]["data"]
+        except Exception as e:
+            logger.warning(f"Failed to fetch Steam details for app_id {app_id}: {e}")
+        return {}
+
+    def _format_size(self, size_bytes: int) -> str:
+        if not size_bytes:
+            return "Unknown"
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if size_bytes < 1024:
+                return f"{size_bytes:.1f} {unit}".rstrip(".0") if unit != "B" else f"{size_bytes} {unit}"
+            size_bytes /= 1024
+        return f"{size_bytes:.1f} PB"
+
     # ---------- reply ------------------------------------------------------
 
     async def _reply_with_entries(
@@ -261,45 +284,76 @@ class Search(commands.Cog):
         query: str,
     ) -> None:
         first = entries[0]
-        title = (
-            first.get("canonical_name")
-            or first.get("game_name")
-            or "Match"
-        )
-        # Escape the title too so markdown-in-game_name can't shape the embed.
-        safe_title = escape_markdown(str(title))[:256]
+        
+        # Determine app_id
+        app_id = first.get("app_id")
+        game_name = first.get("canonical_name") or first.get("game_name") or "Unknown Game"
+        
+        if not app_id:
+            try:
+                steam_populated = await self.steam.size() > 0
+                if steam_populated:
+                    fuzzy = await self.steam.fuzzy_lookup_id(game_name, limit=1, score_cutoff=85)
+                    if fuzzy:
+                        app_id = fuzzy[0][0]
+            except Exception:
+                pass
 
-        # Provide ample but bounded room for the description (Discord's total
-        # embed char budget is 6000; with title+footer+two 1024-char fields
-        # the description should stay under ~3800).
-        description_lines: list[str] = []
-        for e in entries[:10]:
-            name = self._display_name(e)
-            link = e["mega_url"]
-            stale = " ⚠️ *may be expired*" if e.get("is_stale") else ""
-            # escape_markdown protects against phishing via crafted filenames.
-            description_lines.append(
-                f"[{escape_markdown(name)[:100]}]({link}){stale}"
-            )
+        # Fetch steam details if we have an app_id
+        steam_data = {}
+        if app_id:
+            steam_data = await self._fetch_steam_details(app_id)
+            
+        # Extract fields
+        title = steam_data.get("name") or game_name
+        description = steam_data.get("short_description", "No description available.")
+        
+        is_free = steam_data.get("is_free", False)
+        price_overview = steam_data.get("price_overview", {})
+        price = "Free" if is_free else price_overview.get("final_formatted", "Price N/A")
+        
+        developers = ", ".join(steam_data.get("developers", [])) or "Unknown"
+        publishers = ", ".join(steam_data.get("publishers", [])) or "Unknown"
+        
+        release_date = steam_data.get("release_date", {}).get("date", "Unknown")
+        genres = ", ".join([g["description"] for g in steam_data.get("genres", [])]) or "Unknown"
+        
+        header_image = steam_data.get("header_image")
+
         embed = discord.Embed(
-            title=safe_title,
-            description="\n".join(description_lines)[:3800]
-            or "_(no entries)_",
-            color=discord.Color.blurple(),
+            title=f"🌐 {escape_markdown(title)}",
+            description=f"{description}\n\n**{price}**\n\n",
+            color=discord.Color.green(),
         )
-        if first.get("app_id"):
-            embed.add_field(
-                name="Steam",
-                value=(
-                    f"https://store.steampowered.com/app/{first['app_id']}"
-                ),
-            )
-        if first.get("filename") and len(embed) + 1024 < 6000:
-            embed.add_field(
-                name="File",
-                value=str(escape_markdown(first["filename"]))[:1024],
-                inline=False,
-            )
+        
+        if app_id:
+            embed.url = f"https://store.steampowered.com/app/{app_id}"
+
+        # Setup author (using bot's own avatar as placeholder for Nerai Gen)
+        bot_user = interaction.client.user
+        embed.set_author(name=bot_user.display_name if bot_user else "Nerai Gen", icon_url=bot_user.display_avatar.url if bot_user else None)
+
+        # Construct download link strings
+        dl_text = ""
+        for e in entries[:5]:
+            filename = e.get("filename") or e.get("game_name") or "Download"
+            link = e["mega_url"]
+            size_str = self._format_size(e.get("size_bytes") or 0)
+            
+            # Format: 📥 [Filename](URL) \n 📄 Size
+            dl_text += f"📥 [{escape_markdown(title)} - {escape_markdown(filename)}]({link})\n📄 {size_str}\n\n"
+        
+        embed.description += dl_text
+        
+        embed.add_field(name="👨‍💻 Developer", value=escape_markdown(developers), inline=True)
+        embed.add_field(name="🏢 Publisher", value=escape_markdown(publishers), inline=True)
+        embed.add_field(name="📅 Released", value=escape_markdown(release_date), inline=True)
+        embed.add_field(name="🎮 Genre", value=escape_markdown(genres), inline=True)
+        embed.add_field(name="🛡️ Denuvo", value="No / Unknown", inline=True)
+        
+        if header_image:
+            embed.set_image(url=header_image)
+
         embed.set_footer(
             text=(
                 "Links are community-sourced from the source server and may be "
@@ -309,11 +363,10 @@ class Search(commands.Cog):
 
         view = discord.ui.View(timeout=300)
         for e in entries[:5]:
-            view.add_item(discord.ui.Button(label="Open", url=e["mega_url"]))
+            view.add_item(discord.ui.Button(label="Open Link", url=e["mega_url"]))
 
-        await interaction.followup.send(
-            embed=embed, view=view, ephemeral=True
-        )
+        # Send public message (ephemeral=False was handled in the defer)
+        await interaction.followup.send(embed=embed, view=view)
 
     # ---------- commands ---------------------------------------------------
 
@@ -339,7 +392,8 @@ class Search(commands.Cog):
             )
             return
 
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        # Success messages will be public
+        await interaction.response.defer(thinking=True, ephemeral=False)
 
         if multi:
             entries = await self._resolve_multi(query)
