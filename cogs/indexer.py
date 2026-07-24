@@ -188,6 +188,13 @@ class Indexer(commands.Cog):
             else datetime.now(timezone.utc).isoformat(timespec="seconds")
         )
         text = _message_text(message)
+        
+        # Inject the thread title into the parsed text. In a forum channel,
+        # users usually put the game name in the Thread Title, not the body.
+        # By prepending "Title: ...", parser.py's TITLE_LABEL_RE will extract it.
+        if isinstance(message.channel, discord.Thread):
+            text = f"Title: {message.channel.name}\n{text}"
+
         entries = parser.parse_message(
             text,
             source_message_id=message.id,
