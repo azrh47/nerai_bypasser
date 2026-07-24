@@ -314,3 +314,72 @@ class Admin(commands.Cog):
         await interaction.response.send_message(
             f"✅ Stopped indexing <#{channel_id}>.", ephemeral=True
         )
+
+    @admin.command(
+        name="add_game",
+        description="Add a new game link directly to the source channel.",
+    )
+    @app_commands.describe(
+        game_name="The name of the game",
+        link="The Mega.nz link (or other text)",
+        channel_id_str="Optional: The ID of the source channel to post to"
+    )
+    @app_commands.guild_only()
+    async def add_game_cmd(
+        self,
+        interaction: discord.Interaction,
+        game_name: str,
+        link: str,
+        channel_id_str: str | None = None,
+    ) -> None:
+        if not _is_admin(interaction):
+            await interaction.response.send_message(
+                "Admin only.", ephemeral=True
+            )
+            return
+
+        if not config.SOURCE_CHANNELS:
+            await interaction.response.send_message(
+                "No source channels configured.", ephemeral=True
+            )
+            return
+
+        if channel_id_str:
+            try:
+                target_id = int(channel_id_str)
+            except ValueError:
+                await interaction.response.send_message("Invalid channel ID.", ephemeral=True)
+                return
+            if target_id not in config.SOURCE_CHANNELS:
+                await interaction.response.send_message(f"Channel {target_id} is not a configured source channel.", ephemeral=True)
+                return
+        else:
+            target_id = config.SOURCE_CHANNELS[0]
+
+        try:
+            channel = self.bot.get_channel(target_id) or await self.bot.fetch_channel(target_id)
+        except (discord.NotFound, discord.Forbidden):
+            await interaction.response.send_message("Could not fetch the source channel.", ephemeral=True)
+            return
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        
+        try:
+            if isinstance(channel, discord.ForumChannel):
+                thread_with_message = await channel.create_thread(
+                    name=game_name,
+                    content=link
+                )
+                url = thread_with_message.thread.jump_url if hasattr(thread_with_message, 'thread') else None
+                msg = f"✅ Created thread **{game_name}** in <#{target_id}>!"
+                if url:
+                    msg += f"\nLink: {url}"
+                await interaction.followup.send(msg, ephemeral=True)
+            elif isinstance(channel, discord.TextChannel):
+                message = await channel.send(content=f"**{game_name}**\n{link}")
+                await interaction.followup.send(f"✅ Posted **{game_name}** in <#{target_id}>!\nLink: {message.jump_url}", ephemeral=True)
+            else:
+                await interaction.followup.send("Target channel is neither a Forum nor a TextChannel.", ephemeral=True)
+        except Exception as e:
+            logger.exception("Failed to post new game")
+            await interaction.followup.send(f"❌ Error posting game: {e}", ephemeral=True)
