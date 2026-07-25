@@ -179,3 +179,25 @@ https://mega.nz/file/MegaOne#MegaOneHash
     assert len(urls) == 2
     assert any(u.startswith("https://mega.nz/") for u in urls)
     assert any(u.startswith("https://www.mediafire.com/") for u in urls)
+
+
+def test_gdrive_url_extracted():
+    text = "https://drive.google.com/file/d/1a2b3c4d5e6f7g8h9i0j/view?usp=sharing"
+    entries = parse_message(text, source_message_id=13)
+    assert len(entries) == 1
+    assert entries[0].mega_url.startswith("https://drive.google.com/file/d/")
+    assert entries[0].is_folder is False
+
+
+def test_1fichier_url_extracted():
+    text = "https://1fichier.com/?abcdefghij1234567890"
+    entries = parse_message(text, source_message_id=14)
+    assert len(entries) == 1
+    assert entries[0].mega_url.startswith("https://1fichier.com/?")
+
+
+def test_magnet_url_extracted():
+    text = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Cool+Game"
+    entries = parse_message(text, source_message_id=15)
+    assert len(entries) == 1
+    assert entries[0].mega_url.startswith("magnet:?xt=urn:btih:")

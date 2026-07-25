@@ -15,6 +15,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import re
 import aiosqlite
 import httpx
 
@@ -23,6 +24,29 @@ import config
 logger = logging.getLogger(__name__)
 
 STEAM_APPLIST_URL = "https://api.steampowered.com/IStoreService/GetAppList/v1/"
+
+
+def clean_game_name(text: str) -> str:
+    """Strip release tags, group prefixes, and repack noise from a game title."""
+    if not text:
+        return ""
+    s = str(text)
+    # 1. Strip leading group prefixes like "RAGE - ", "RUNE - ", "FLT | ", "CODEX : "
+    s = re.sub(r"^[A-Za-z0-9_]{2,10}\s*[-|:]\s+", "", s)
+    # 2. Strip leading bracketed tags like "[RUNE] ", "[FitGirl Repack] "
+    s = re.sub(r"^\[.*?\]\s*", "", s)
+    # 3. Strip trailing parenthetical or bracketed tags like "(+12 DLCs)", "[FitGirl Repack]"
+    s = re.sub(r"\s*[\(\[].*?[\)\]]\s*$", "", s)
+    # 4. Strip common repack/piracy tags as whole words
+    s = re.sub(
+        r"\b(BYPASS|REPACK|CRACK|CRACKED|HOTFIX|PATCH|FIX|PRE-?INSTALLED|FREE DOWNLOAD|GOG|MULTI\d*|ONLINE|V\d+(?:\.\d+)*)\b",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+    # 5. Clean up multiple spaces and trailing separators
+    s = re.sub(r"\s+", " ", s).strip(" -|_!.")
+    return s
 
 
 class SteamCache:
@@ -156,14 +180,20 @@ class SteamCache:
         # Build a names-only list for rapidfuzz; map back via index.
         names = [c[1] for c in choices]
 
-        from rapidfuzz import process  # local import: hot path stays light
+        from rapidfuzz import process, fuzz, utils  # local import: hot path stays light
+
+        cleaned_query = clean_game_name(query)
+        if not cleaned_query:
+            cleaned_query = query
 
         loop = asyncio.get_running_loop()
         raw = await loop.run_in_executor(
             None,
             lambda: process.extract(
-                query,
+                cleaned_query,
                 names,
+                scorer=fuzz.token_set_ratio,
+                processor=utils.default_process,
                 limit=limit,
                 score_cutoff=score_cutoff,
             ),

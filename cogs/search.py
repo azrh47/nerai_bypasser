@@ -219,7 +219,9 @@ class Search(commands.Cog):
             )
             if fuzzy:
                 app_id, _name, _score = fuzzy[0]
-                return await self.db.get_entries_by_app_id(app_id)
+                entries = await self.db.get_entries_by_app_id(app_id)
+                if entries:
+                    return entries
         return await self.db.search_entries(query, limit=10)
 
     async def _resolve_multi(self, query: str) -> list[dict]:
@@ -289,17 +291,27 @@ class Search(commands.Cog):
     ) -> None:
         first = entries[0]
         
-        # Determine app_id
-        app_id = first.get("app_id")
+        # Determine app_id by checking all entries first
+        app_id = None
+        for e in entries:
+            if e.get("app_id"):
+                app_id = e.get("app_id")
+                break
+
         game_name = first.get("canonical_name") or first.get("game_name") or "Unknown Game"
         
         if not app_id:
             try:
                 steam_populated = await self.steam.size() > 0
                 if steam_populated:
-                    fuzzy = await self.steam.fuzzy_lookup_id(game_name, limit=1, score_cutoff=75)
-                    if fuzzy:
-                        app_id = fuzzy[0][0]
+                    if query and not query.startswith(("db:", "app:")) and not query.isdigit():
+                        fuzzy = await self.steam.fuzzy_lookup_id(query, limit=1, score_cutoff=70)
+                        if fuzzy:
+                            app_id = fuzzy[0][0]
+                    if not app_id:
+                        fuzzy = await self.steam.fuzzy_lookup_id(game_name, limit=1, score_cutoff=70)
+                        if fuzzy:
+                            app_id = fuzzy[0][0]
             except Exception:
                 pass
 
@@ -339,13 +351,14 @@ class Search(commands.Cog):
 
         # Construct download link strings
         dl_text = ""
-        for e in entries[:5]:
+        for i, e in enumerate(entries[:5]):
             filename = e.get("filename") or e.get("game_name") or "Download"
             link = e["mega_url"]
             size_str = self._format_size(e.get("size_bytes") or 0)
+            badge = "⭐ **[LATEST UPDATE]** " if i == 0 and len(entries) > 1 else ""
             
-            # Format: 📥 [Filename](URL) \n 📄 Size
-            dl_text += f"📥 [{escape_markdown(title)} - {escape_markdown(filename)}]({link})\n📄 {size_str}\n\n"
+            # Format: ⭐ [LATEST UPDATE] 📥 [Filename](URL) \n 📄 Size
+            dl_text += f"{badge}📥 [{escape_markdown(title)} - {escape_markdown(filename)}]({link})\n📄 {size_str}\n\n"
         
         embed.description += dl_text
         

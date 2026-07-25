@@ -284,3 +284,47 @@ class Database:
         async with aiosqlite.connect(self.db_path) as conn:
             await conn.execute("DELETE FROM settings WHERE key = ?", (key,))
             await conn.commit()
+
+    # ---------- Wishlists ---------------------------------------------------
+
+    async def add_wishlist(self, user_id: int, query: str) -> None:
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute(
+                """
+                INSERT INTO wishlists (user_id, query, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, query) DO NOTHING
+                """,
+                (user_id, query.strip().lower(), _now_iso()),
+            )
+            await conn.commit()
+
+    async def remove_wishlist(self, user_id: int, query: str) -> bool:
+        async with aiosqlite.connect(self.db_path) as conn:
+            cur = await conn.execute(
+                "DELETE FROM wishlists WHERE user_id = ? AND query = ?",
+                (user_id, query.strip().lower()),
+            )
+            await conn.commit()
+            return cur.rowcount > 0
+
+    async def get_user_wishlists(self, user_id: int) -> list[str]:
+        async with aiosqlite.connect(self.db_path) as conn:
+            async with conn.execute(
+                "SELECT query FROM wishlists WHERE user_id = ? ORDER BY created_at DESC",
+                (user_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        return [r[0] for r in rows]
+
+    async def get_matching_wishlists(self, game_name: str) -> list[tuple[int, str]]:
+        """Find user_id and query pairs where game_name matches the query."""
+        game_lower = game_name.strip().lower()
+        async with aiosqlite.connect(self.db_path) as conn:
+            async with conn.execute("SELECT user_id, query FROM wishlists") as cur:
+                rows = await cur.fetchall()
+        matches = []
+        for user_id, query in rows:
+            if query in game_lower or game_lower in query:
+                matches.append((user_id, query))
+        return matches

@@ -153,6 +153,13 @@ class Indexer(commands.Cog):
                 entry.canonical_name = canonical
                 if not entry.game_name:
                     entry.game_name = canonical
+        elif entry.app_id is None and entry.game_name:
+            try:
+                fuzzy = await self.steam.fuzzy_lookup_id(entry.game_name, limit=1, score_cutoff=70)
+                if fuzzy:
+                    entry.app_id, entry.canonical_name, _ = fuzzy[0]
+            except Exception:
+                pass
         return entry
 
     async def _persist_entry(
@@ -176,10 +183,30 @@ class Indexer(commands.Cog):
             }
         )
 
+    async def _notify_wishlists(self, entry: parser.ParsedEntry, message: discord.Message) -> None:
+        if not entry.game_name:
+            return
+        matches = await self.db.get_matching_wishlists(entry.game_name)
+        for user_id, query in matches:
+            try:
+                user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+                if user:
+                    embed = discord.Embed(
+                        title="🎯 Wishlist Notification!",
+                        description=f"Good news! A game matching your wishlist item **{query}** was just uploaded:\n\n**{entry.game_name}**\n📥 [Download Link]({entry.mega_url})\n\n*(This item has been automatically removed from your wishlist to prevent spam)*",
+                        color=discord.Color.green(),
+                    )
+                    await user.send(embed=embed)
+                await self.db.remove_wishlist(user_id, query)
+            except Exception as e:
+                logger.warning("Failed to send wishlist DM to %s: %s", user_id, e)
+                await self.db.remove_wishlist(user_id, query)
+
     async def _run_parser(
         self,
         message: discord.Message,
         source_channel_id: int,
+        notify_wishlists: bool = False,
     ) -> int:
         author_id = message.author.id if message.author else None
         posted_at = (
@@ -204,8 +231,11 @@ class Indexer(commands.Cog):
         count = 0
         for entry in entries:
             try:
-                await self._persist_entry(entry, source_channel_id=source_channel_id)
-                count += 1
+                row_id = await self._persist_entry(entry, source_channel_id=source_channel_id)
+                if row_id > 0:
+                    count += 1
+                    if notify_wishlists:
+                        await self._notify_wishlists(entry, message)
             except Exception:
                 logger.exception("Failed to persist entry: %s", entry.mega_url)
         return count

@@ -60,6 +60,24 @@ TRANSFER_IT_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Google Drive URLs:
+GDRIVE_URL_RE = re.compile(
+    r"https?://(?:drive|docs)\.google\.com/(?:file/d/|drive/folders/|open\?id=)[A-Za-z0-9_\-]+(?:/[^\s><'\"]*)?",
+    re.IGNORECASE,
+)
+
+# 1Fichier URLs:
+ONEFICHIER_URL_RE = re.compile(
+    r"https?://(?:[A-Za-z0-9_\-]+\.)?1fichier\.com/(?:\?[A-Za-z0-9_\-]+)?",
+    re.IGNORECASE,
+)
+
+# Torrent Magnet URLs:
+MAGNET_URL_RE = re.compile(
+    r"magnet:\?xt=urn:btih:[a-fA-F0-9]{32,40}[^\s><'\"]*",
+    re.IGNORECASE,
+)
+
 # store.steampowered.com/app/<id>  -> app_id
 STEAM_APP_URL_RE = re.compile(
     r"store\.steampowered\.com/app/(\d+)", re.IGNORECASE
@@ -295,20 +313,23 @@ def parse_message(
     if not text:
         return []
 
-    # Walk Mega, MediaFire, and transfer.it regexes, dedupe by full URL.
+    # Walk Mega, MediaFire, transfer.it, GDrive, 1Fichier, and Magnet regexes.
     matches: list[tuple[str, bool]] = []  # (full_url, is_folder)
     seen: set[str] = set()
-    for pattern in (MEGA_URL_RE, MEDIAFIRE_URL_RE, TRANSFER_IT_URL_RE):
+    for pattern in (
+        MEGA_URL_RE,
+        MEDIAFIRE_URL_RE,
+        TRANSFER_IT_URL_RE,
+        GDRIVE_URL_RE,
+        ONEFICHIER_URL_RE,
+        MAGNET_URL_RE,
+    ):
         for m in pattern.finditer(text):
             url = m.group(0)
             if url in seen:
                 continue
             seen.add(url)
-            # Mega and Mediafire use group(1) for file vs folder.
-            # Transfer.it doesn't have folder paths in the regex.
-            is_folder = False
-            if m.lastindex and m.lastindex >= 1:
-                is_folder = m.group(1).lower() == "folder"
+            is_folder = "folder" in url.lower()
             matches.append((url, is_folder))
 
     if not matches:
