@@ -40,6 +40,24 @@ class TestSteamCache(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(results[0][0], 300)  # Should match Assassin's Creed Mirage, NOT RAGE
             self.assertEqual(results[0][1], "Assassin's Creed Mirage")
 
+    async def test_memory_caching(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "steam.db")
+            cache = SteamCache(db_path, refresh_after=timedelta(hours=24))
+            
+            import aiosqlite
+            async with aiosqlite.connect(db_path) as conn:
+                await conn.execute("CREATE TABLE apps (app_id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+                await conn.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)")
+                now_str = datetime.now(timezone.utc).isoformat()
+                await conn.execute("INSERT INTO settings VALUES (?, ?)", ("steam_cache_fetched_at", now_str))
+                await conn.execute("INSERT INTO apps VALUES (?, ?)", (668580, "Atomic Heart"))
+                await conn.commit()
+
+            self.assertEqual(await cache.lookup_id(668580), "Atomic Heart")
+            self.assertEqual(await cache.size(), 1)
+            self.assertTrue(len(cache._apps_cache) == 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -150,6 +150,18 @@ class Search(commands.Cog):
         choices: list[app_commands.Choice[str]] = []
         seen_labels: set[str] = set()
 
+        for e in db_matches:
+            label = f"[DB] {escape_markdown(self._display_name(e))[:80]}"
+            if not label.strip() or label in seen_labels:
+                continue
+            seen_labels.add(label)
+            value = (
+                f"app:{e['app_id']}"
+                if e.get("app_id") is not None
+                else f"db:{e['id']}"
+            )
+            choices.append(app_commands.Choice(name=label, value=value))
+
         # Steam fuzzy name match — only if cache is populated.
         if steam_populated:
             try:
@@ -167,18 +179,6 @@ class Search(commands.Cog):
                     app_commands.Choice(name=label, value=str(app_id))
                 )
 
-        for e in db_matches:
-            label = f"[DB] {escape_markdown(self._display_name(e))[:80]}"
-            if not label.strip() or label in seen_labels:
-                continue
-            seen_labels.add(label)
-            value = (
-                f"app:{e['app_id']}"
-                if e.get("app_id") is not None
-                else f"db:{e['id']}"
-            )
-            choices.append(app_commands.Choice(name=label, value=value))
-
         return choices[:25]
 
     # ---------- resolvers --------------------------------------------------
@@ -190,7 +190,15 @@ class Search(commands.Cog):
                 app_id = int(query[4:])
             except ValueError:
                 return []
-            return await self.db.get_entries_by_app_id(app_id)
+            entries = await self.db.get_entries_by_app_id(app_id)
+            if entries:
+                return entries
+            steam_name = await self.steam.lookup_id(app_id)
+            if steam_name:
+                entries = await self.db.search_entries(steam_name, limit=10)
+                if entries:
+                    return entries
+            return []
 
         if query.startswith("db:"):
             try:
@@ -206,7 +214,14 @@ class Search(commands.Cog):
             if entries:
                 return entries
             entry = await self.db.get_entry_by_id(app_id)
-            return [entry] if entry else []
+            if entry:
+                return [entry]
+            steam_name = await self.steam.lookup_id(app_id)
+            if steam_name:
+                entries = await self.db.search_entries(steam_name, limit=10)
+                if entries:
+                    return entries
+            return []
 
         # Text query: Steam fuzzy name first, then DB substring.
         try:
@@ -215,7 +230,7 @@ class Search(commands.Cog):
             steam_populated = False
         if steam_populated:
             fuzzy = await self.steam.fuzzy_lookup_id(
-                query, limit=1, score_cutoff=70
+                query, limit=1, score_cutoff=60
             )
             if fuzzy:
                 app_id, _name, _score = fuzzy[0]
@@ -226,8 +241,38 @@ class Search(commands.Cog):
 
     async def _resolve_multi(self, query: str) -> list[dict]:
         """Resolve a query with multiple results for /search."""
+        if query.startswith("app:"):
+            try:
+                app_id = int(query[4:])
+                entries = await self.db.get_entries_by_app_id(app_id, limit=20)
+                if not entries:
+                    steam_name = await self.steam.lookup_id(app_id)
+                    if steam_name:
+                        entries = await self.db.search_entries(steam_name, limit=20)
+                return entries
+            except ValueError:
+                return []
+
+        if query.startswith("db:"):
+            try:
+                db_id = int(query[3:])
+                entry = await self.db.get_entry_by_id(db_id)
+                return [entry] if entry else []
+            except ValueError:
+                return []
+
         if query.isdigit():
-            return await self.db.get_entries_by_app_id(int(query), limit=20)
+            app_id = int(query)
+            entries = await self.db.get_entries_by_app_id(app_id, limit=20)
+            if not entries:
+                entry = await self.db.get_entry_by_id(app_id)
+                if entry:
+                    entries = [entry]
+                else:
+                    steam_name = await self.steam.lookup_id(app_id)
+                    if steam_name:
+                        entries = await self.db.search_entries(steam_name, limit=20)
+            return entries
 
         results: dict[tuple[Optional[str], Optional[int]], dict] = {}
         try:
@@ -236,7 +281,7 @@ class Search(commands.Cog):
             steam_populated = False
         if steam_populated:
             fuzzy = await self.steam.fuzzy_lookup_id(
-                query, limit=10, score_cutoff=70
+                query, limit=10, score_cutoff=60
             )
             for app_id, _name, _score in fuzzy:
                 for e in await self.db.get_entries_by_app_id(app_id, limit=5):

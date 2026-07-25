@@ -60,6 +60,9 @@ class SteamCache:
         self.db_path = db_path
         self.refresh_after = refresh_after
         self._lock = asyncio.Lock()
+        self._apps_cache: list[tuple[int, str]] = []
+        self._names_cache: list[str] = []
+        self._id_map_cache: dict[int, str] = {}
 
     async def initialize(self) -> None:
         """Ensure the apps + settings tables exist (schema.sql does the work)."""
@@ -80,6 +83,17 @@ class SteamCache:
         except ValueError:
             return None
 
+    async def _load_memory_cache(self) -> None:
+        try:
+            async with aiosqlite.connect(self.db_path) as conn:
+                async with conn.execute("SELECT app_id, name FROM apps") as cur:
+                    rows = await cur.fetchall()
+            self._apps_cache = [(int(r[0]), str(r[1])) for r in rows]
+            self._names_cache = [c[1] for c in self._apps_cache]
+            self._id_map_cache = {c[0]: c[1] for c in self._apps_cache}
+        except Exception as exc:
+            logger.warning("Failed to load Steam cache into memory: %s", exc)
+
     async def _ensure_fresh(self) -> None:
         last = await self._last_fetched_at()
         if last is None:
@@ -87,6 +101,9 @@ class SteamCache:
             return
         if datetime.now(timezone.utc) - last > self.refresh_after:
             await self.refresh()
+            return
+        if not self._apps_cache:
+            await self._load_memory_cache()
 
     async def refresh(self) -> int:
         """Fetch the full Steam app list and replace the cache. Returns count stored."""
@@ -147,16 +164,12 @@ class SteamCache:
                     (datetime.now(timezone.utc).isoformat(timespec="seconds"),),
                 )
                 await conn.commit()
+            await self._load_memory_cache()
             return len(applist)
 
     async def lookup_id(self, app_id: int) -> Optional[str]:
         await self._ensure_fresh()
-        async with aiosqlite.connect(self.db_path) as conn:
-            async with conn.execute(
-                "SELECT name FROM apps WHERE app_id = ?", (int(app_id),)
-            ) as cur:
-                row = await cur.fetchone()
-        return row[0] if row else None
+        return self._id_map_cache.get(int(app_id))
 
     async def fuzzy_lookup_id(
         self, query: str, limit: int = 10, score_cutoff: int = 60
@@ -167,18 +180,8 @@ class SteamCache:
         """
         await self._ensure_fresh()
         query = query.strip()
-        if not query:
+        if not query or not self._apps_cache:
             return []
-
-        async with aiosqlite.connect(self.db_path) as conn:
-            async with conn.execute("SELECT app_id, name FROM apps") as cur:
-                rows = await cur.fetchall()
-        if not rows:
-            return []
-
-        choices = [(int(r[0]), str(r[1])) for r in rows]
-        # Build a names-only list for rapidfuzz; map back via index.
-        names = [c[1] for c in choices]
 
         from rapidfuzz import process, fuzz, utils  # local import: hot path stays light
 
@@ -191,17 +194,15 @@ class SteamCache:
             None,
             lambda: process.extract(
                 cleaned_query,
-                names,
+                self._names_cache,
                 scorer=fuzz.token_set_ratio,
                 processor=utils.default_process,
                 limit=limit,
                 score_cutoff=score_cutoff,
             ),
         )
-        return [(choices[idx][0], choices[idx][1], int(score)) for _, score, idx in raw]
+        return [(self._apps_cache[idx][0], self._apps_cache[idx][1], int(score)) for _, score, idx in raw]
 
     async def size(self) -> int:
-        async with aiosqlite.connect(self.db_path) as conn:
-            async with conn.execute("SELECT COUNT(*) FROM apps") as cur:
-                row = await cur.fetchone()
-        return int(row[0]) if row else 0
+        await self._ensure_fresh()
+        return len(self._apps_cache)
