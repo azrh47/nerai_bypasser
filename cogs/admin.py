@@ -346,40 +346,50 @@ class Admin(commands.Cog):
 
         if channel_id_str:
             try:
-                target_id = int(channel_id_str)
+                target_ids = [int(channel_id_str)]
             except ValueError:
                 await interaction.response.send_message("Invalid channel ID.", ephemeral=True)
                 return
-            if target_id not in config.SOURCE_CHANNELS:
-                await interaction.response.send_message(f"Channel {target_id} is not a configured source channel.", ephemeral=True)
+            if target_ids[0] not in config.SOURCE_CHANNELS:
+                await interaction.response.send_message(f"Channel {target_ids[0]} is not a configured source channel.", ephemeral=True)
                 return
         else:
-            target_id = config.SOURCE_CHANNELS[0]
-
-        try:
-            channel = self.bot.get_channel(target_id) or await self.bot.fetch_channel(target_id)
-        except (discord.NotFound, discord.Forbidden):
-            await interaction.response.send_message("Could not fetch the source channel.", ephemeral=True)
-            return
+            # Broadcast to all unique source channels
+            target_ids = list(set(config.SOURCE_CHANNELS))
 
         await interaction.response.defer(thinking=True, ephemeral=True)
         
-        try:
-            if isinstance(channel, discord.ForumChannel):
-                thread_with_message = await channel.create_thread(
-                    name=game_name,
-                    content=link
-                )
-                url = thread_with_message.thread.jump_url if hasattr(thread_with_message, 'thread') else None
-                msg = f"✅ Created thread **{game_name}** in <#{target_id}>!"
-                if url:
-                    msg += f"\nLink: {url}"
-                await interaction.followup.send(msg, ephemeral=True)
-            elif isinstance(channel, discord.TextChannel):
-                message = await channel.send(content=f"**{game_name}**\n{link}")
-                await interaction.followup.send(f"✅ Posted **{game_name}** in <#{target_id}>!\nLink: {message.jump_url}", ephemeral=True)
-            else:
-                await interaction.followup.send("Target channel is neither a Forum nor a TextChannel.", ephemeral=True)
-        except Exception as e:
-            logger.exception("Failed to post new game")
-            await interaction.followup.send(f"❌ Error posting game: {e}", ephemeral=True)
+        successes = []
+        errors = []
+
+        for target_id in target_ids:
+            try:
+                channel = self.bot.get_channel(target_id) or await self.bot.fetch_channel(target_id)
+            except (discord.NotFound, discord.Forbidden):
+                errors.append(f"<#{target_id}>: Could not fetch channel")
+                continue
+
+            try:
+                if isinstance(channel, discord.ForumChannel):
+                    thread_with_message = await channel.create_thread(
+                        name=game_name,
+                        content=link
+                    )
+                    url = thread_with_message.thread.jump_url if hasattr(thread_with_message, 'thread') else None
+                    successes.append(f"<#{target_id}>: [Thread]({url})" if url else f"<#{target_id}>: Thread created")
+                elif isinstance(channel, discord.TextChannel):
+                    message = await channel.send(content=f"**{game_name}**\n{link}")
+                    successes.append(f"<#{target_id}>: [Message]({message.jump_url})")
+                else:
+                    errors.append(f"<#{target_id}>: Neither a Forum nor a TextChannel")
+            except Exception as e:
+                logger.exception("Failed to post new game to %s", target_id)
+                errors.append(f"<#{target_id}>: Error - {e}")
+
+        msg = f"**{game_name}**\n"
+        if successes:
+            msg += "✅ **Posted in:**\n" + "\n".join(successes) + "\n"
+        if errors:
+            msg += "❌ **Failed in:**\n" + "\n".join(errors)
+            
+        await interaction.followup.send(msg, ephemeral=True)
