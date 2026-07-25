@@ -119,6 +119,10 @@ STEAM_API_KEY: str = os.getenv("STEAM_API_KEY", "").strip()
 # Admin user IDs (may use /admin reseed, /admin stats, etc.).
 ADMIN_USER_IDS: list[int] = _optional_int_list("ADMIN_USER_IDS")
 
+# Uploader / Partner User IDs and Role IDs (may use /add).
+UPLOADER_USER_IDS: list[int] = _optional_int_list("UPLOADER_USER_IDS")
+UPLOADER_ROLE_IDS: list[int] = _optional_int_list("UPLOADER_ROLE_IDS")
+
 # Paths.
 DATABASE_PATH: str = os.getenv("DATABASE_PATH", "data/bot.sqlite")
 SCHEMA_PATH: str = os.getenv("SCHEMA_PATH", "schema.sql")

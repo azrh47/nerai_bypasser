@@ -157,11 +157,13 @@ class GameIndexerBot(commands.Bot):
         from cogs.search import Search
         from cogs.admin import Admin
         from cogs.wishlist import Wishlist
+        from cogs.uploader import Uploader
 
         await self.add_cog(Indexer(self, self.db, self.steam))
         await self.add_cog(Search(self, self.db, self.steam))
         await self.add_cog(Admin(self, self.db, self.steam))
         await self.add_cog(Wishlist(self, self.db))
+        await self.add_cog(Uploader(self))
 
         if config.TARGET_GUILD_IDS:
             for gid in config.TARGET_GUILD_IDS:
