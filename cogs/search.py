@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections import defaultdict
 from typing import Optional
@@ -326,6 +327,37 @@ class Search(commands.Cog):
             size_bytes /= 1024
         return f"{size_bytes:.1f} PB"
 
+    def _clean_display_filename(self, raw_name: str, fallback_title: str) -> str:
+        if not raw_name:
+            return fallback_title or "Download"
+        s = str(raw_name)
+        s = re.sub(r"\.(rar|zip|7z|tar|gz|iso|exe|torrent|bin|part\d+)$", "", s, flags=re.IGNORECASE)
+        s = s.replace("_", " ")
+        s = re.sub(r"\.(?!\d)", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        if not s:
+            return fallback_title or "Download"
+        
+        words = []
+        for word in s.split():
+            upper_w = word.upper()
+            if upper_w in {"DLC", "DLCS", "PC", "HD", "VR", "II", "III", "IV", "VI", "VII", "VIII", "IX", "XI", "XII", "XIII", "XIV", "XV"}:
+                words.append(upper_w)
+            elif word.startswith(("v", "V")) and any(c.isdigit() for c in word):
+                words.append(upper_w if len(word) <= 5 else word.capitalize())
+            else:
+                words.append(word.capitalize())
+        clean = " ".join(words)
+
+        if fallback_title and clean.lower().startswith(fallback_title.lower()):
+            return clean
+        elif fallback_title and (
+            len(clean) <= 12 or 
+            any(clean.lower().startswith(prefix) for prefix in ("patch", "update", "fix", "hotfix", "v", "version", "crack", "repack", "dlc", "bonus"))
+        ):
+            return f"{fallback_title} - {clean}"
+        return clean
+
     # ---------- reply ------------------------------------------------------
 
     async def _reply_with_entries(
@@ -394,16 +426,44 @@ class Search(commands.Cog):
         bot_user = interaction.client.user
         embed.set_author(name=bot_user.display_name if bot_user else "Nerai Gen", icon_url=bot_user.display_avatar.url if bot_user else None)
 
+        # Deduplicate entries from multiple source channels/servers
+        # Since entries is sorted by posted_at DESC (newest first), keeping the first occurrence per unique release keeps the latest one!
+        unique_entries = []
+        seen_keys = set()
+        for e in entries:
+            raw_name = e.get("filename") or e.get("game_name") or ""
+            clean_key = re.sub(r"[\W_]+", "", raw_name).lower()
+            if not clean_key:
+                clean_key = e.get("mega_url") or str(e.get("id"))
+            url_key = e.get("mega_url")
+            if clean_key in seen_keys or url_key in seen_keys:
+                continue
+            seen_keys.add(clean_key)
+            seen_keys.add(url_key)
+            unique_entries.append(e)
+
         # Construct download link strings
         dl_text = ""
-        for i, e in enumerate(entries[:5]):
-            filename = e.get("filename") or e.get("game_name") or "Download"
-            link = e["mega_url"]
-            size_str = self._format_size(e.get("size_bytes") or 0)
-            badge = "⭐ **[LATEST UPDATE]** " if i == 0 and len(entries) > 1 else ""
-            
-            # Format: ⭐ [LATEST UPDATE] 📥 [Filename](URL) \n 📄 Size
-            dl_text += f"{badge}📥 [{escape_markdown(title)} - {escape_markdown(filename)}]({link})\n📄 {size_str}\n\n"
+        top_entry = unique_entries[0]
+        top_name = self._clean_display_filename(top_entry.get("filename") or top_entry.get("game_name") or "", title)
+        top_url = top_entry["mega_url"]
+        top_size = top_entry.get("size_bytes") or 0
+        size_str = f" • 📦 **Size:** {self._format_size(top_size)}" if top_size > 0 else ""
+
+        dl_text += (
+            "⭐ **LATEST & SAFEST RELEASE**\n"
+            f"📥 **[{escape_markdown(top_name)}]({top_url})**{size_str}\n\n"
+        )
+
+        if len(unique_entries) > 1:
+            dl_text += "**Alternative / Additional Releases:**\n"
+            for i, e in enumerate(unique_entries[1:3], start=1):
+                alt_name = self._clean_display_filename(e.get("filename") or e.get("game_name") or "", title)
+                alt_url = e["mega_url"]
+                alt_size = e.get("size_bytes") or 0
+                alt_size_str = f" • 📦 {self._format_size(alt_size)}" if alt_size > 0 else ""
+                dl_text += f"🔗 [{escape_markdown(alt_name)}]({alt_url}){alt_size_str}\n"
+            dl_text += "\n"
         
         embed.description += dl_text
         
@@ -425,8 +485,9 @@ class Search(commands.Cog):
         )
 
         view = discord.ui.View(timeout=300)
-        for e in entries[:5]:
-            view.add_item(discord.ui.Button(label="Open Link", url=e["mega_url"]))
+        view.add_item(discord.ui.Button(label="🚀 Download Latest (Safe)", url=unique_entries[0]["mega_url"]))
+        for i, e in enumerate(unique_entries[1:3], start=1):
+            view.add_item(discord.ui.Button(label=f"🔗 Alternative #{i}", url=e["mega_url"]))
 
         # Send public message (ephemeral=False was handled in the defer)
         await interaction.followup.send(embed=embed, view=view)
