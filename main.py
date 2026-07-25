@@ -135,8 +135,11 @@ class GameIndexerBot(commands.Bot):
         # This takes ~10s but the health server is already running, so Render won't kill us.
         try:
             await self.steam._ensure_fresh()
+            repaired = await self.db.repair_canonical_names(self.steam)
+            if repaired > 0:
+                logging.info("Auto-repaired %d database entries on startup", repaired)
         except Exception as exc:
-            logging.warning("Failed to refresh Steam cache on startup: %s", exc)
+            logging.warning("Failed to refresh Steam cache or repair DB on startup: %s", exc)
 
         # Hydrate config.SOURCE_CHANNELS from any previously-registered list.
         runtime = await _load_runtime_source_channels(self.db)

@@ -328,3 +328,37 @@ class Database:
             if query in game_lower or game_lower in query:
                 matches.append((user_id, query))
         return matches
+
+    async def repair_canonical_names(self, steam: Any) -> int:
+        """Scan all DB entries and re-run fuzzy matching with updated scoring algorithms to fix wrong app_ids/canonical names."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute(
+                "SELECT id, game_name, canonical_name, app_id FROM entries WHERE game_name IS NOT NULL AND game_name != ''"
+            ) as cur:
+                rows = await cur.fetchall()
+
+        repaired = 0
+        updates = []
+        for row in rows:
+            g_name = row["game_name"]
+            if not g_name:
+                continue
+            fuzzy = await steam.fuzzy_lookup_id(g_name, limit=1, score_cutoff=60)
+            if fuzzy:
+                new_app_id, new_canonical, _score = fuzzy[0]
+                old_app_id = row["app_id"]
+                old_canonical = row["canonical_name"]
+                if new_app_id != old_app_id or new_canonical != old_canonical:
+                    updates.append((new_app_id, new_canonical, row["id"]))
+                    repaired += 1
+
+        if updates:
+            async with aiosqlite.connect(self.db_path) as conn:
+                await conn.executemany(
+                    "UPDATE entries SET app_id = ?, canonical_name = ? WHERE id = ?",
+                    updates,
+                )
+                await conn.commit()
+            logger.info("Repaired %d entries in database with corrected Steam IDs and canonical names.", repaired)
+        return repaired

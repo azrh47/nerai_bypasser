@@ -393,3 +393,23 @@ class Admin(commands.Cog):
             msg += "❌ **Failed in:**\n" + "\n".join(errors)
             
         await interaction.followup.send(msg, ephemeral=True)
+
+    @admin.command(
+        name="fix_games",
+        description="Re-match all indexed games against Steam using improved scoring algorithm.",
+    )
+    @app_commands.guild_only()
+    async def fix_games_cmd(
+        self, interaction: discord.Interaction
+    ) -> None:
+        if not _is_admin(interaction):
+            await interaction.response.send_message(
+                "Admin only.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        repaired = await self.db.repair_canonical_names(self.steam)
+        await interaction.followup.send(
+            f"✅ Re-matched and repaired **{repaired}** entries in the database!",
+            ephemeral=True,
+        )

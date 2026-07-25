@@ -195,13 +195,24 @@ class SteamCache:
             lambda: process.extract(
                 cleaned_query,
                 self._names_cache,
-                scorer=fuzz.token_set_ratio,
+                scorer=fuzz.WRatio,
                 processor=utils.default_process,
-                limit=limit,
+                limit=max(limit * 3, 25),
                 score_cutoff=score_cutoff,
             ),
         )
-        return [(self._apps_cache[idx][0], self._apps_cache[idx][1], int(score)) for _, score, idx in raw]
+
+        def rank_key(item: tuple[str, float, int]) -> tuple[int, float, float]:
+            name_str, score_val, _ = item
+            q_lower = cleaned_query.lower()
+            n_lower = name_str.lower()
+            exact = 1 if n_lower == q_lower else 0
+            len_diff = abs(len(n_lower) - len(q_lower))
+            adjusted_score = score_val - (len_diff * 0.8)
+            return (exact, adjusted_score, score_val)
+
+        sorted_raw = sorted(raw, key=rank_key, reverse=True)[:limit]
+        return [(self._apps_cache[idx][0], self._apps_cache[idx][1], int(score)) for _, score, idx in sorted_raw]
 
     async def size(self) -> int:
         await self._ensure_fresh()

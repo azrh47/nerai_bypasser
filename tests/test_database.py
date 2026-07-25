@@ -98,3 +98,28 @@ async def test_settings_roundtrip(db: Database):
     assert await db.get_setting("hello") == "world"
     await db.delete_setting("hello")
     assert await db.get_setting("hello") is None
+
+
+class DummySteam:
+    async def fuzzy_lookup_id(self, query: str, limit: int = 10, score_cutoff: int = 60):
+        if "red dead redemption" in query.lower():
+            return [(2668510, "Red Dead Redemption", 100)]
+        return []
+
+
+async def test_repair_canonical_names(db: Database):
+    await db.upsert_entry(
+        {
+            "source_channel_id": 100,
+            "source_message_id": 999,
+            "mega_url": "https://mega.nz/file/RDRtest#key",
+            "game_name": "Red Dead Redemption",
+            "canonical_name": "Redemption",
+            "app_id": 388880,
+        }
+    )
+    repaired = await db.repair_canonical_names(DummySteam())
+    assert repaired == 1
+    entries = await db.get_entries_by_app_id(2668510)
+    assert len(entries) == 1
+    assert entries[0]["canonical_name"] == "Red Dead Redemption"
