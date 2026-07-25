@@ -766,10 +766,10 @@ class Indexer(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        if message.author == self.bot.user:
-            return
-        if message.author is not None and message.author.bot:
-            return
+        # We allow bot messages (including our own) so that threads created by
+        # /admin add_game are indexed instantly. The bot's other commands respond
+        # ephemerally, which do not trigger on_message, so there's no risk of
+        # indexing search results.
         # The source-channel identity of a forum-post message is the FORUM,
         # not the thread, so we route through ``_resolve_source_cid`` to
         # produce the correct lookup key against SOURCE_CHANNELS. Without
