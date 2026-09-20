@@ -66,6 +66,11 @@ def _configure_logging() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     logging.getLogger("discord.http").setLevel(logging.WARNING)
+    # Render health-probes this port every few seconds, and the keep-alive
+    # heartbeat adds its own requests on top. aiohttp's access log prints one
+    # line per request at INFO, which drowns out the bot's own logs in the
+    # Render dashboard. Keep warnings/errors (real handler failures) visible.
+    logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 
 
 async def _load_runtime_source_channels(db: Database) -> list[int]:
@@ -235,21 +240,35 @@ class GameIndexerBot(commands.Bot):
         logging.info("Env summary: %s", config.env_summary())
 
 
-async def _run_bot_with_login_retry(bot: GameIndexerBot) -> None:
-    """Run ``bot.start()`` with bounded retry + backoff for login rate limits.
+async def _login_with_retry(bot: GameIndexerBot) -> None:
+    """Log in to Discord, retrying only on Cloudflare-style login rate limits.
 
     Render's own restart policy already re-runs the process on persistent
     failure, so this is a defense-in-depth wrapper: it gives the first boot a
     few chances to survive a temporary Cloudflare block without immediately
     giving up and forcing a full container restart.
 
-    Non-login failures (KeyboardInterrupt, gateway hard errors, etc.) are
-    re-raised immediately so Render can observe the real failure mode.
+    Deliberately calls ``bot.login()``, never ``bot.start()``:
+
+    * ``start()`` is just ``login() + connect()``, and discord.py calls
+      ``setup_hook()`` from *inside* ``login()`` (discord/client.py).
+    * Our ``setup_hook()`` calls ``add_cog(...)`` five times, and ``add_cog``
+      raises ``ClientException: Cog named 'Indexer' already loaded`` on a
+      second registration.
+
+    So retrying the whole ``start()`` would re-run setup on attempt 2 and turn
+    a transient ~18s rate limit into a crash loop -- exactly the failure this
+    wrapper exists to prevent. ``connect()`` is called once, after a successful
+    login; it handles its own reconnects internally.
+
+    Non-login failures (KeyboardInterrupt, gateway hard errors, a genuinely
+    malformed token) are re-raised immediately so Render observes the real
+    failure mode instead of us hiding it behind retries.
     """
     retry = 0
     while True:
         try:
-            await bot.start(config.DISCORD_TOKEN)
+            await bot.login(config.DISCORD_TOKEN)
             return
         except KeyboardInterrupt:
             raise
@@ -258,8 +277,12 @@ async def _run_bot_with_login_retry(bot: GameIndexerBot) -> None:
                 raise
             retry += 1
             if retry > LOGIN_MAX_RETRIES:
+                # ``retry`` is the attempt counter, so the number of retries
+                # actually performed is LOGIN_MAX_RETRIES -- logging the raw
+                # counter here would overstate it by one.
                 logging.error(
-                    "Login rate-limited after %d retries; giving up", retry
+                    "Login rate-limited after %d retries; giving up",
+                    LOGIN_MAX_RETRIES,
                 )
                 raise
             backoff = min(
@@ -289,7 +312,8 @@ async def main() -> None:
     # succeeds even during the multi-second Steam app list cache warmup.
     health_runner = await _start_health_server()
     try:
-        await _run_bot_with_login_retry(bot)
+        await _login_with_retry(bot)
+        await bot.connect()
     except KeyboardInterrupt:
         logging.info("Interrupted by user")
     finally:

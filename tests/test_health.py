@@ -15,7 +15,14 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from main import _build_health_app, _health_response, _parse_port
+import logging
+
+from main import (
+    _build_health_app,
+    _configure_logging,
+    _health_response,
+    _parse_port,
+)
 
 
 def _run(coro):
@@ -72,6 +79,13 @@ def test_health_app_endpoint_count_matches_expectation() -> None:
 
 
 # ---------- _parse_port: env-var parsing edge cases --------------------------
+
+
+def test_configure_logging_quiets_probe_noise() -> None:
+    """Render probes $PORT every few seconds; per-request INFO lines bury our logs."""
+    _configure_logging()
+    assert logging.getLogger("aiohttp.access").level == logging.WARNING
+    assert logging.getLogger("discord.http").level == logging.WARNING
 
 
 def test_parse_port_returns_integer_when_set(monkeypatch) -> None:

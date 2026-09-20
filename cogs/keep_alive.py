@@ -5,17 +5,23 @@ idle-sleep after a period of inactivity and need an external pinger to stay
 warm. Even on paid tiers it is common for operators to want an internal
 heartbeat so the service is clearly alive from the inside.
 
-This cog does that from inside the bot's event loop: every
+This cog ticks from inside the bot's event loop: every
 ``KEEP_ALIVE_INTERVAL_SEC`` seconds it issues a single HTTP GET to the
-service's own ``/healthz`` (and ``/``) endpoint. That request itself is the
-work Render sees, which is enough to reset the idle timer on the platforms
-that care about inbound HTTP traffic.
+service's own ``/healthz`` (and ``/``) endpoint.
 
-The primary external pinger should still be something like UptimeRobot or
-another external monitor hitting ``https://<service>.onrender.com/healthz``.
-This cog is a belt-and-suspenders fallback for the 15-minute inactivity sleep
-window you mentioned (keep-alive tick every 10 minutes, well inside the
-15-minute boundary).
+WHAT THIS DOES NOT DO: it does not keep a sleeping service awake. Render's
+idle timer is driven by traffic arriving over the public routing layer, and a
+request from inside the container to ``127.0.0.1`` never leaves the container,
+so Render cannot see it. Render's own health probes hit the port every few
+seconds and free services still spin down -- which is the proof that requests
+which don't come through the public URL don't reset the timer. Keeping a
+``type: web`` service on the free tier awake requires an EXTERNAL pinger such
+as UptimeRobot (or a scheduled GitHub Action / cron-job.org) hitting
+``https://<service>.onrender.com/healthz`` every few minutes.
+
+What this cog *is* good for: an internal liveness heartbeat that exercises the
+health server and makes a wedged event loop visible in the logs, which is easy
+to leave enabled and costs two requests per interval.
 
 It is safe to leave loaded on any platform. On a host that is already always-on
 the pings are harmless no-ops, and ``KEEP_ALIVE_INTERVAL_SEC=0`` turns the
