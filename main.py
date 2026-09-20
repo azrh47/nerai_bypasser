@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import sys
 
 import discord
@@ -26,6 +27,37 @@ from database import Database
 from steam_cache import SteamCache
 
 SOURCE_CHANNELS_SETTING_KEY = "source_channels"
+
+# Login retry tuning.
+#
+# Discord's Cloudflare layer can return Error 1015 / 429 during login when
+# the egress IP has been temporarily blocked. Render's own restart policy
+# will re-run main() on failure, so this wrapper is intentionally bounded:
+# it only retries a small number of times with exponential backoff so a
+# bad deploy doesn't hammer /users/@me in a tight loop.
+#
+# Tunables.
+LOGIN_MAX_RETRIES = int(os.getenv("LOGIN_MAX_RETRIES", "5"))
+LOGIN_BASE_BACKOFF_SEC = float(os.getenv("LOGIN_BASE_BACKOFF_SEC", "15"))
+LOGIN_MAX_BACKOFF_SEC = float(os.getenv("LOGIN_MAX_BACKOFF_SEC", "600"))
+
+
+def _is_login_rate_limit(exc: BaseException) -> bool:
+    """Return True if ``exc`` looks like a Discord/Cloudflare login rate limit.
+
+    discord.py surfaces the HTTP response payload via ``HTTPException.response``
+    (an ``aiohttp.ClientResponse``). A Cloudflare block page is HTML, not JSON,
+    and the status is 429, so we check both the status code and the content type.
+    """
+    if not isinstance(exc, discord.HTTPException):
+        return False
+    if exc.status != 429:
+        return False
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return True
+    content_type = resp.content_type
+    return content_type is None or not content_type.startswith("application/json")
 
 
 def _configure_logging() -> None:
@@ -165,6 +197,31 @@ class GameIndexerBot(commands.Bot):
         await self.add_cog(Wishlist(self, self.db))
         await self.add_cog(Uploader(self))
 
+        # Keep-alive cog is optional: it only matters on platforms that sleep
+        # idle web services (Render free tier, etc.). On an always-on host it
+        # is a harmless no-op, so we load it unconditionally as long as the
+        # module is present.
+        try:
+            from cogs.keep_alive import KeepAlive
+
+            await self.add_cog(
+                KeepAlive(
+                    self,
+                    health_base_url=os.getenv(
+                        "KEEP_ALIVE_BASE_URL", "http://127.0.0.1:10000"
+                    ),
+                )
+            )
+            # Interval / enabled-vs-disabled detail is logged by the cog itself
+            # once it starts (or skips starting), so don't restate the knobs
+            # here where they could drift out of sync with the cog's guard.
+            logging.info(
+                "Loaded keep-alive cog (probing %s)",
+                os.getenv("KEEP_ALIVE_BASE_URL", "http://127.0.0.1:10000"),
+            )
+        except Exception:
+            logging.debug("Keep-alive cog not available; skipping", exc_info=True)
+
         if config.TARGET_GUILD_IDS:
             for gid in config.TARGET_GUILD_IDS:
                 guild = discord.Object(id=gid)
@@ -178,6 +235,50 @@ class GameIndexerBot(commands.Bot):
         logging.info("Env summary: %s", config.env_summary())
 
 
+async def _run_bot_with_login_retry(bot: GameIndexerBot) -> None:
+    """Run ``bot.start()`` with bounded retry + backoff for login rate limits.
+
+    Render's own restart policy already re-runs the process on persistent
+    failure, so this is a defense-in-depth wrapper: it gives the first boot a
+    few chances to survive a temporary Cloudflare block without immediately
+    giving up and forcing a full container restart.
+
+    Non-login failures (KeyboardInterrupt, gateway hard errors, etc.) are
+    re-raised immediately so Render can observe the real failure mode.
+    """
+    retry = 0
+    while True:
+        try:
+            await bot.start(config.DISCORD_TOKEN)
+            return
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            if not _is_login_rate_limit(exc):
+                raise
+            retry += 1
+            if retry > LOGIN_MAX_RETRIES:
+                logging.error(
+                    "Login rate-limited after %d retries; giving up", retry
+                )
+                raise
+            backoff = min(
+                LOGIN_MAX_BACKOFF_SEC,
+                LOGIN_BASE_BACKOFF_SEC * (2 ** (retry - 1)),
+            )
+            # Small jitter so a fleet of retries does not land on the same
+            # second and re-trigger the block immediately.
+            jitter = random.uniform(0, backoff * 0.25)
+            sleep_for = backoff + jitter
+            logging.warning(
+                "Login rate-limited (attempt %d/%d); backing off %.1fs",
+                retry,
+                LOGIN_MAX_RETRIES,
+                sleep_for,
+            )
+            await asyncio.sleep(sleep_for)
+
+
 async def main() -> None:
     _configure_logging()
     db = Database(config.DATABASE_PATH, config.SCHEMA_PATH)
@@ -188,7 +289,7 @@ async def main() -> None:
     # succeeds even during the multi-second Steam app list cache warmup.
     health_runner = await _start_health_server()
     try:
-        await bot.start(config.DISCORD_TOKEN)
+        await _run_bot_with_login_retry(bot)
     except KeyboardInterrupt:
         logging.info("Interrupted by user")
     finally:
@@ -216,3 +317,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         sys.exit(0)
+    except Exception:
+        logging.exception("Unhandled error in main(); exiting")
+        sys.exit(1)

@@ -129,6 +129,26 @@ services:
         value: "false"
         sync: false
 
+      # Keep-alive heartbeat (see cogs/keep_alive.py). The cog pings the
+      # service's own /healthz + / every 10 min from inside the bot's event
+      # loop -- inside the 15-min inactivity window Render sleeps on -- so
+      # the container sees inbound traffic even if the external pinger is
+      # down. Set KEEP_ALIVE_INTERVAL_SEC to 0 to disable it without
+      # dropping the cog.
+      - key: KEEP_ALIVE_INTERVAL_SEC
+        value: "600"
+        sync: false
+
+      - key: KEEP_ALIVE_TIMEOUT_SEC
+        value: "10"
+        sync: false
+
+      # In-container self-probe. Override only if you point the heartbeat at
+      # an external URL; when PORT is changed, keep this in sync with it.
+      - key: KEEP_ALIVE_BASE_URL
+        value: http://127.0.0.1:10000
+        sync: false
+
       # ALLOWED_ROLE_NAME and SOURCE_GUILD_ID are intentionally NOT declared.
       # Leaving them unset lets `os.getenv()` return None, which config.py
       # treats as "no role gate" / "no legacy singular source guild". Omitting

@@ -207,6 +207,14 @@ sample message into `/admin parser_test`; iterate on the regexes in
   requests), so `is_stale` stays `false`. If you enable
   `MEGA_STALENESS_CHECK=true` you get periodic verification but expect
   false positives from Mega's anti-bot layer.
+* **Keep-alive**: on a sleeping tier the bot pings its own `/healthz` and
+  `/` endpoints from inside its event loop every `KEEP_ALIVE_INTERVAL_SEC`
+  (default 600s = 10 min, inside the 15-min inactivity window) so Render
+  keeps seeing inbound traffic. This is a *fallback* — the primary defence
+  is still an external pinger such as UptimeRobot hitting
+  `https://<service>.onrender.com/healthz`. Set `KEEP_ALIVE_INTERVAL_SEC=0`
+  to disable the heartbeat on an always-on host. A failed probe is logged
+  and retried on the next tick; it never stops the heartbeat.
 * **SQLite WAL** mode is enabled in `schema.sql` so reads don't block
   writes. Concurrent `/get` and the live indexer will not contend.
 * **Privacy**: ephemeral defaults mean a colleague reading your public
@@ -224,7 +232,7 @@ sample message into `/admin parser_test`; iterate on the regexes in
 | Bot logs `Forbidden during backfill` | Bot was added to the source server without `Read Message History` permission. Re-authorize. |
 | `/get <anything>` returns "no matches" | The bot has not yet indexed those entries. Run `/admin stats` to see counts. If 0, run `/admin reseed <source_channel>`. |
 | `/get` autocomplete is empty | Steam cache is stale. Try `/admin refresh_steam`. Requires `Message Content Intent` enabled. |
-| Bot keeps disconnecting on Render free | You're on the sleeping tier. Either upgrade to Render paid, or move to Oracle / Hetzner. |
+| Bot keeps disconnecting on Render free | You're on the sleeping tier. Set `KEEP_ALIVE_INTERVAL_SEC` (default 600) and/or add an external pinger on `/healthz`; otherwise upgrade to Render paid, or move to Oracle / Hetzner. |
 
 ---
 
