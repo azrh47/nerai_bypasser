@@ -148,8 +148,45 @@ def test_retry_never_calls_bot_start(monkeypatch) -> None:
     bot.start.assert_not_awaited()
 
 
+def test_default_retry_has_no_ceiling(monkeypatch) -> None:
+    """By default the wrapper outlasts a long Cloudflare block instead of exiting.
+
+    Giving up would hand control back to Render, whose restart resets the
+    backoff to its base and re-hammers the blocked endpoint. Failing more times
+    than the old default of 5 must therefore still eventually succeed.
+    """
+    monkeypatch.setattr(main_module, "LOGIN_MAX_RETRIES", 0)
+    monkeypatch.setattr(main_module.asyncio, "sleep", AsyncMock())
+
+    bot = MagicMock()
+    bot.login = AsyncMock(side_effect=[_cloudflare_429()] * 8 + [None])
+
+    _run(main_module._login_with_retry(bot))
+
+    assert bot.login.await_count == 9
+
+
+def test_failed_login_closes_the_leaked_http_session(monkeypatch) -> None:
+    """Regression: each failed login strands an aiohttp session.
+
+    discord.py's ``static_login`` creates a fresh ``ClientSession`` per call and
+    never closes the old one on failure, so a long block would accumulate one
+    unclosed session (and one aiohttp warning) per retry.
+    """
+    monkeypatch.setattr(main_module.asyncio, "sleep", AsyncMock())
+
+    bot = MagicMock()
+    bot.login = AsyncMock(side_effect=[_cloudflare_429(), _cloudflare_429(), None])
+    bot.http.close = AsyncMock()
+
+    _run(main_module._login_with_retry(bot))
+
+    # Two failed attempts -> two sessions reclaimed before the next try.
+    assert bot.http.close.await_count == 2
+
+
 def test_gives_up_after_max_retries_and_surfaces_the_error(monkeypatch) -> None:
-    """A permanent block must exit, not spin forever: Render then restarts us."""
+    """Bounded mode is opt-in: setting a positive cap exits so Render restarts."""
     monkeypatch.setattr(main_module, "LOGIN_MAX_RETRIES", 2)
     sleeps: list[float] = []
     monkeypatch.setattr(

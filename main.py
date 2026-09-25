@@ -12,6 +12,7 @@ the probe times out and Render marks the deploy unhealthy.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -30,14 +31,21 @@ SOURCE_CHANNELS_SETTING_KEY = "source_channels"
 
 # Login retry tuning.
 #
-# Discord's Cloudflare layer can return Error 1015 / 429 during login when
-# the egress IP has been temporarily blocked. Render's own restart policy
-# will re-run main() on failure, so this wrapper is intentionally bounded:
-# it only retries a small number of times with exponential backoff so a
-# bad deploy doesn't hammer /users/@me in a tight loop.
+# Discord's Cloudflare layer can return Error 1015 / 429 during login when the
+# egress IP has been temporarily blocked. Those blocks routinely outlast a
+# handful of retries, and *giving up* is what makes them self-sustaining:
+# exiting hands control back to Render, whose restart policy re-runs main()
+# from scratch and resets the backoff to LOGIN_BASE_BACKOFF_SEC -- so the same
+# block gets hammered every few minutes instead of being left alone to expire.
+# The health server in this process already answers Render's probe, so the
+# deploy is marked live either way; staying up and backing off is strictly
+# better than restarting into the block.
 #
-# Tunables.
-LOGIN_MAX_RETRIES = int(os.getenv("LOGIN_MAX_RETRIES", "5"))
+# Therefore LOGIN_MAX_RETRIES defaults to 0, meaning "retry forever". Set it to
+# a positive integer to restore bounded behaviour (useful if you want a
+# permanently-blocked egress IP to surface as a non-zero exit instead of a
+# process that idles until the platform kills it).
+LOGIN_MAX_RETRIES = int(os.getenv("LOGIN_MAX_RETRIES", "0"))
 LOGIN_BASE_BACKOFF_SEC = float(os.getenv("LOGIN_BASE_BACKOFF_SEC", "15"))
 LOGIN_MAX_BACKOFF_SEC = float(os.getenv("LOGIN_MAX_BACKOFF_SEC", "600"))
 
@@ -58,6 +66,37 @@ def _is_login_rate_limit(exc: BaseException) -> bool:
         return True
     content_type = resp.content_type
     return content_type is None or not content_type.startswith("application/json")
+
+
+async def _close_http_session(bot: commands.Bot) -> None:
+    """Close the HTTP session stranded by a failed ``login()``.
+
+    discord.py 2.x's ``HTTPClient.static_login`` builds a brand-new
+    ``aiohttp.ClientSession`` on EVERY call and simply overwrites
+    ``self.__session`` on the next attempt -- it does not close the previous
+    one when ``/users/@me`` raises. Each retry therefore leaks a session,
+    which aiohttp reports as ``Unclosed client session`` when it is garbage
+    collected (exactly what the production logs showed between retries).
+
+    Safe to call repeatedly: ``HTTPClient.close()`` closes the underlying
+    session but not the reusable ``TCPConnector`` it was built with, so the next
+    ``login()`` still works. Clients whose ``.http`` is absent or not
+    awaitable (tests, a partially-constructed bot) are ignored, hence the
+    ``isawaitable`` guard rather than a bare ``await``.
+    """
+    http = getattr(bot, "http", None)
+    close = getattr(http, "close", None)
+    if close is None:
+        return
+    try:
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        logging.warning(
+            "Failed to close leaked HTTP session after a failed login",
+            exc_info=True,
+        )
 
 
 def _configure_logging() -> None:
@@ -167,7 +206,7 @@ class GameIndexerBot(commands.Bot):
     async def setup_hook(self) -> None:
         await self.db.initialize()
         await self.steam.initialize()
-        
+
         # Populate the Steam cache on startup so fuzzy lookups work immediately.
         # This takes ~10s but the health server is already running, so Render won't kill us.
         try:
@@ -176,7 +215,9 @@ class GameIndexerBot(commands.Bot):
             if repaired > 0:
                 logging.info("Auto-repaired %d database entries on startup", repaired)
         except Exception as exc:
-            logging.warning("Failed to refresh Steam cache or repair DB on startup: %s", exc)
+            logging.warning(
+                "Failed to refresh Steam cache or repair DB on startup: %s", exc
+            )
 
         # Hydrate config.SOURCE_CHANNELS from any previously-registered list.
         runtime = await _load_runtime_source_channels(self.db)
@@ -225,7 +266,9 @@ class GameIndexerBot(commands.Bot):
                 os.getenv("KEEP_ALIVE_BASE_URL", "http://127.0.0.1:10000"),
             )
         except Exception:
-            logging.debug("Keep-alive cog not available; skipping", exc_info=True)
+            logging.debug(
+                "Keep-alive cog not available; skipping", exc_info=True
+            )
 
         if config.TARGET_GUILD_IDS:
             for gid in config.TARGET_GUILD_IDS:
@@ -243,10 +286,13 @@ class GameIndexerBot(commands.Bot):
 async def _login_with_retry(bot: GameIndexerBot) -> None:
     """Log in to Discord, retrying only on Cloudflare-style login rate limits.
 
-    Render's own restart policy already re-runs the process on persistent
-    failure, so this is a defense-in-depth wrapper: it gives the first boot a
-    few chances to survive a temporary Cloudflare block without immediately
-    giving up and forcing a full container restart.
+    Retries indefinitely by default (``LOGIN_MAX_RETRIES<=0``) with capped
+    exponential backoff. Handing control back to Render mid-block is worse
+    than waiting it out: Render's restart policy re-runs ``main()`` from
+    scratch, resetting the backoff to ``LOGIN_BASE_BACKOFF_SEC`` and pounding
+    the same blocked endpoint every few minutes -- which keeps the block
+    alive. The health server is already serving, so an idle-and-backed-off
+    process looks exactly as healthy to Render as a logged-in one.
 
     Deliberately calls ``bot.login()``, never ``bot.start()``:
 
@@ -276,7 +322,9 @@ async def _login_with_retry(bot: GameIndexerBot) -> None:
             if not _is_login_rate_limit(exc):
                 raise
             retry += 1
-            if retry > LOGIN_MAX_RETRIES:
+            # LOGIN_MAX_RETRIES <= 0 means "no ceiling": keep backing off until
+            # Cloudflare lets us through. Only a positive value is bounded.
+            if LOGIN_MAX_RETRIES > 0 and retry > LOGIN_MAX_RETRIES:
                 # ``retry`` is the attempt counter, so the number of retries
                 # actually performed is LOGIN_MAX_RETRIES -- logging the raw
                 # counter here would overstate it by one.
@@ -285,6 +333,10 @@ async def _login_with_retry(bot: GameIndexerBot) -> None:
                     LOGIN_MAX_RETRIES,
                 )
                 raise
+            # Reclaim the session the failed attempt leaked before we wait;
+            # otherwise a long block accumulates one unclosed session per
+            # retry (and one aiohttp "Unclosed client session" warning each).
+            await _close_http_session(bot)
             backoff = min(
                 LOGIN_MAX_BACKOFF_SEC,
                 LOGIN_BASE_BACKOFF_SEC * (2 ** (retry - 1)),
@@ -293,13 +345,35 @@ async def _login_with_retry(bot: GameIndexerBot) -> None:
             # second and re-trigger the block immediately.
             jitter = random.uniform(0, backoff * 0.25)
             sleep_for = backoff + jitter
-            logging.warning(
-                "Login rate-limited (attempt %d/%d); backing off %.1fs",
-                retry,
-                LOGIN_MAX_RETRIES,
-                sleep_for,
-            )
+            if LOGIN_MAX_RETRIES > 0:
+                logging.warning(
+                    "Login rate-limited (attempt %d/%d); backing off %.1fs",
+                    retry,
+                    LOGIN_MAX_RETRIES,
+                    sleep_for,
+                )
+            else:
+                logging.warning(
+                    "Login rate-limited (attempt %d); backing off %.1fs",
+                    retry,
+                    sleep_for,
+                )
             await asyncio.sleep(sleep_for)
+
+
+async def _close_db(db: Database) -> None:
+    """Shared teardown step for the SQLite connection.
+
+    ``Database`` used to expose ``close()`` in its signature, and several
+    callers wrote ``await db.close()`` expecting a real coroutine. It is a
+    no-op today, but keeping the shutdown path in one place makes the
+    contract explicit and guarantees a failed ``.close()`` can never
+    short-circuit the rest of the shutdown sequence.
+    """
+    try:
+        await db.close()
+    except Exception:
+        logging.exception("Failed to close database on shutdown")
 
 
 async def main() -> None:
@@ -334,6 +408,8 @@ async def main() -> None:
                 "Error during health runner cleanup; continuing shutdown"
             )
         logging.info("Health server stopped")
+
+        await _close_db(db)
 
 
 if __name__ == "__main__":

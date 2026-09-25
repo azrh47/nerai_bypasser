@@ -149,6 +149,23 @@ services:
         value: http://127.0.0.1:10000
         sync: false
 
+      # Discord login retry tuning (see main.py). Cloudflare intermittently
+      # answers /users/@me with a 429/HTML block page on boot. LOGIN_MAX_RETRIES
+      # of 0 means "keep backing off until it clears" -- set a positive number
+      # only if you'd rather the process exit (and Render restart it) after a
+      # bounded number of attempts.
+      - key: LOGIN_MAX_RETRIES
+        value: "0"
+        sync: false
+
+      - key: LOGIN_BASE_BACKOFF_SEC
+        value: "15"
+        sync: false
+
+      - key: LOGIN_MAX_BACKOFF_SEC
+        value: "600"
+        sync: false
+
       # ALLOWED_ROLE_NAME and SOURCE_GUILD_ID are intentionally NOT declared.
       # Leaving them unset lets `os.getenv()` return None, which config.py
       # treats as "no role gate" / "no legacy singular source guild". Omitting
